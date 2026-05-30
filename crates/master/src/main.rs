@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod db;
 mod models;
 mod probe;
@@ -33,6 +34,19 @@ fn probe_interval() -> u64 {
 }
 fn fail_threshold() -> i64 {
     std::env::var("ZF_FAIL_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(2)
+}
+fn jwt_secret() -> Vec<u8> {
+    // P4 简单方案：env 提供秘钥；缺失则警告并使用临时随机值（重启后旧 token 失效）
+    if let Ok(s) = std::env::var("ZF_JWT_SECRET") {
+        return s.into_bytes();
+    }
+    tracing::warn!("ZF_JWT_SECRET 未设置，使用进程内随机秘钥（重启后已有 token 失效）");
+    uuid::Uuid::new_v4().as_bytes().to_vec()
+}
+fn admin_bootstrap() -> Option<(String, String)> {
+    let u = std::env::var("ZF_ADMIN_USER").ok()?;
+    let p = std::env::var("ZF_ADMIN_PASS").ok()?;
+    Some((u, p))
 }
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
@@ -148,11 +162,29 @@ async fn main() -> Result<()> {
     let pool = db::init(&db_url()).await?;
     tracing::info!(url = %db_url(), "sqlite ready (migrated)");
 
+    // 首次启动：根据 env 引导 admin 账号
+    if let Some((u, p)) = admin_bootstrap() {
+        let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE username=?")
+            .bind(&u).fetch_one(&pool).await?;
+        if exists == 0 {
+            let hash = auth::hash_password(&p)?;
+            let now = now_ms() as i64;
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, role, created_at, updated_at) \
+                 VALUES (?,?,'admin',?,?)",
+            )
+            .bind(&u).bind(&hash).bind(now).bind(now)
+            .execute(&pool).await?;
+            tracing::info!(user = %u, "bootstrap admin created");
+        }
+    }
+
     // 健康探测调度器
     probe::spawn(pool.clone(), probe_interval(), fail_threshold());
 
     // HTTP 控制 API
-    let app = api::router(pool.clone());
+    let auth_state = auth::AuthState::new(&jwt_secret());
+    let app = api::router(api::AppState { pool: pool.clone(), auth: auth_state });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
     let http_task = tokio::spawn(async move { axum::serve(http_listener, app).await });
