@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Zhuanfa · 高性能转发平台 · 路线图</title>
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#12161c; --panel-2:#181d25;
+    --line:#222933; --line-2:#2a3340;
+    --fg:#e6e9ee; --fg-dim:#8a93a3; --fg-mute:#5b6470;
+    --accent:#7cf3a0; --accent-2:#5ad6ff; --warn:#ffb454; --danger:#ff6b6b;
+    --mono:'SF Mono','JetBrains Mono','Menlo','Consolas',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Inter','PingFang SC','Microsoft YaHei',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  body{min-height:100vh;padding:48px 24px 96px}
+  .wrap{max-width:1180px;margin:0 auto}
+
+  /* HEADER */
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding-bottom:32px;border-bottom:1px solid var(--line)}
+  .brand{display:flex;flex-direction:column;gap:8px}
+  .brand .tag{font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--fg-mute);text-transform:uppercase}
+  .brand h1{font-size:38px;font-weight:600;letter-spacing:-.02em}
+  .brand h1 .accent{color:var(--accent)}
+  .brand .sub{color:var(--fg-dim);font-size:15px;max-width:620px}
+  .meta{text-align:right;font-family:var(--mono);font-size:11px;color:var(--fg-mute);line-height:1.8}
+  .meta b{color:var(--fg-dim);font-weight:500}
+
+  /* PROGRESS GLOBAL */
+  .prog{margin-top:28px;display:flex;align-items:center;gap:16px}
+  .prog .bar{flex:1;height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden;position:relative}
+  .prog .bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));border-radius:3px;width:0%;transition:width .5s ease}
+  .prog .num{font-family:var(--mono);font-size:13px;color:var(--fg-dim);min-width:90px;text-align:right}
+  .prog .num b{color:var(--accent);font-size:18px;font-weight:600}
+
+  /* SECTION */
+  section{margin-top:56px}
+  section > h2{font-size:11px;letter-spacing:.22em;color:var(--fg-mute);text-transform:uppercase;font-weight:500;margin-bottom:20px;font-family:var(--mono)}
+
+  /* GRID */
+  .grid{display:grid;gap:16px}
+  .grid-3{grid-template-columns:repeat(3,1fr)}
+  .grid-2{grid-template-columns:repeat(2,1fr)}
+
+  /* CARD base */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}
+  .card h3{font-size:15px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .card .desc{color:var(--fg-dim);font-size:13px}
+
+  /* ARCHITECTURE diagram */
+  .arch{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:28px;font-family:var(--mono);font-size:12px;line-height:1.8;white-space:pre;overflow-x:auto;color:var(--fg-dim)}
+  .arch .h{color:var(--accent)}
+  .arch .a{color:var(--accent-2)}
+  .arch .w{color:var(--warn)}
+
+  /* PROTOCOL TABLE */
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th,td{padding:14px 18px;text-align:left;font-size:13px;border-bottom:1px solid var(--line)}
+  th{font-size:11px;letter-spacing:.12em;color:var(--fg-mute);text-transform:uppercase;font-weight:500;background:var(--panel-2)}
+  tbody tr:last-child td{border-bottom:none}
+  td.t{font-family:var(--mono);color:var(--fg)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:4px;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;font-weight:500}
+  .pill.ok{background:rgba(124,243,160,.12);color:var(--accent);border:1px solid rgba(124,243,160,.25)}
+  .pill.no{background:rgba(255,107,107,.08);color:var(--danger);border:1px solid rgba(255,107,107,.2)}
+  .pill.later{background:rgba(255,180,84,.08);color:var(--warn);border:1px solid rgba(255,180,84,.22)}
+
+  /* PHASE */
+  .phase{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;overflow:hidden;transition:border-color .2s}
+  .phase:hover{border-color:var(--line-2)}
+  .phase.done{border-color:rgba(124,243,160,.3)}
+  .phase-head{padding:18px 22px;display:flex;align-items:center;gap:18px;cursor:pointer;user-select:none}
+  .phase-num{font-family:var(--mono);font-size:11px;color:var(--fg-mute);min-width:30px}
+  .phase-title{flex:1;display:flex;flex-direction:column;gap:3px}
+  .phase-title .t{font-size:15px;font-weight:600}
+  .phase-title .d{font-size:12px;color:var(--fg-dim)}
+  .phase-meta{font-family:var(--mono);font-size:11px;color:var(--fg-mute);text-align:right}
+  .phase-meta .pct{color:var(--accent);font-weight:600;font-size:13px}
+  .phase-bar{height:3px;background:var(--panel-2)}
+  .phase-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));width:0%;transition:width .4s ease}
+  .phase-body{display:none;padding:8px 22px 22px;border-top:1px solid var(--line)}
+  .phase.open .phase-body{display:block}
+  .phase.open .phase-head .chev{transform:rotate(90deg)}
+  .chev{color:var(--fg-mute);transition:transform .2s;font-family:var(--mono)}
+
+  .deliv{font-size:12px;color:var(--fg-dim);margin:12px 0 16px;padding:10px 14px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent-2)}
+  .deliv b{color:var(--fg);font-weight:600}
+
+  /* TASK list */
+  .tasks{list-style:none;display:flex;flex-direction:column;gap:6px}
+  .task{display:flex;align-items:flex-start;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;transition:background .15s}
+  .task:hover{background:var(--panel-2)}
+  .task input[type=checkbox]{appearance:none;width:16px;height:16px;border:1.5px solid var(--line-2);border-radius:4px;cursor:pointer;position:relative;flex-shrink:0;margin-top:2px;background:var(--bg);transition:all .15s}
+  .task input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent)}
+  .task input[type=checkbox]:checked::after{content:'';position:absolute;left:4px;top:1px;width:5px;height:9px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .task .text{font-size:13px;color:var(--fg);line-height:1.5}
+  .task input[type=checkbox]:checked + .text{color:var(--fg-mute);text-decoration:line-through;text-decoration-color:var(--line-2)}
+
+  /* RISK */
+  .risk{display:flex;gap:14px;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:10px}
+  .risk .lvl{font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:3px 8px;height:fit-content;border-radius:3px;font-weight:600;flex-shrink:0}
+  .risk .lvl.high{background:rgba(255,107,107,.12);color:var(--danger)}
+  .risk .lvl.mid{background:rgba(255,180,84,.12);color:var(--warn)}
+  .risk .lvl.low{background:rgba(90,214,255,.1);color:var(--accent-2)}
+  .risk .body{flex:1}
+  .risk .title{font-size:13px;font-weight:600;margin-bottom:3px}
+  .risk .mit{font-size:12px;color:var(--fg-dim)}
+
+  /* DECISION log */
+  .deci{padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:8px;font-size:13px}
+  .deci .when{font-family:var(--mono);font-size:10px;color:var(--fg-mute);letter-spacing:.08em}
+  .deci .q{color:var(--fg);margin:6px 0 4px;font-weight:600}
+  .deci .a{color:var(--fg-dim)}
+
+  footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--fg-mute);display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+  footer .reset{color:var(--fg-mute);background:none;border:1px solid var(--line);padding:6px 12px;border-radius:5px;cursor:pointer;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;transition:all .15s}
+  footer .reset:hover{color:var(--danger);border-color:var(--danger)}
+
+  @media(max-width:900px){
+    body{padding:32px 16px 64px}
+    .brand h1{font-size:28px}
+    .grid-3,.grid-2{grid-template-columns:1fr}
+    header{flex-direction:column}
+    .meta{text-align:left}
+    .arch{font-size:10px;padding:18px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HEADER -->
+  <header>
+    <div class="brand">
+      <div class="tag">Project · Zhuanfa</div>
+      <h1>高性能<span class="accent">转发平台</span></h1>
+      <p class="sub">基于 Rust 的多级连跳转发控制平台。差异化定位：<b style="color:var(--fg)">智能调度 + SLA 承诺 + 拓扑可视化</b>。覆盖 TCP/UDP L4 透传，自动支持任意上层代理协议。</p>
+    </div>
+    <div class="meta">
+      <b>started</b> 2026-05-25<br>
+      <b>target v1</b> ~21 weeks<br>
+      <b>stack</b> rust · tonic · axum · postgres · react<br>
+      <b>scale</b> 10–50 客户 / 5–20 节点
+    </div>
+  </header>
+
+  <!-- GLOBAL PROGRESS -->
+  <div class="prog">
+    <div class="bar"><div class="bar-fill" id="globalBar"></div></div>
+    <div class="num"><b id="globalPct">0%</b> · <span id="globalCount">0/0</span></div>
+  </div>
+
+  <!-- ARCHITECTURE -->
+  <section>
+    <h2>架构 · Architecture</h2>
+    <div class="arch">
+<span class="h">┌─────────────────────────────────────────────────────────────┐</span>
+<span class="h">│</span>                     <span class="a">Web UI</span> (React + shadcn)                    <span class="h">│</span>
+<span class="h">│                              ↕ REST                          │</span>
+<span class="h">│                         master (Rust)                        │</span>
+<span class="h">│                ├─ axum (HTTP API)                            │</span>
+<span class="h">│                ├─ tonic (gRPC · mTLS 反向隧道)               │</span>
+<span class="h">│                └─ PostgreSQL                                 │</span>
+<span class="h">│                              ↕ gRPC stream                   │</span>
+<span class="h">│   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐  │</span>
+<span class="h">│   │</span> <span class="a">入口</span>     <span class="h">│←→│</span> <span class="a">中转 1</span>   <span class="h">│←→│</span> <span class="a">中转 N</span>   <span class="h">│←→│</span> <span class="w">家宽出口</span> <span class="h">│  │</span>
+<span class="h">│   │</span> 商业 IP  <span class="h">│  │</span> IPLC     <span class="h">│  │</span> ...      <span class="h">│  │</span> 固定 IP  <span class="h">│  │</span>
+<span class="h">│   └──────────┘   └──────────┘   └──────────┘   └──────────┘  │</span>
+<span class="h">│        ↑ 任意 N 跳路径数组，统一 mTLS，对称节点               │</span>
+<span class="h">└─────────────────────────────────────────────────────────────┘</span>
+
+数据模型：<span class="a">forward { path: [node_a, node_b, ..., node_n] }</span>
+每个节点同时是上一跳的出口 + 下一跳的入口，对称设计。
+    </div>
+  </section>
+
+  <!-- PROTOCOL -->
+  <section>
+    <h2>协议范围 · Protocol Scope</h2>
+    <table>
+      <thead><tr><th>能力</th><th>V1</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td class="t">TCP L4 透传</td><td><span class="pill ok">V1</span></td><td>自动覆盖 SS / Trojan / VLESS / SSH / MySQL / HTTP CONNECT</td></tr>
+        <tr><td class="t">UDP L4 透传</td><td><span class="pill ok">V1</span></td><td>自动覆盖 WireGuard / 游戏 / QUIC / VoIP</td></tr>
+        <tr><td class="t">多级连跳 (N 跳)</td><td><span class="pill ok">V1 架构内建</span></td><td>路径长度 1-10 任意，对称节点设计</td></tr>
+        <tr><td class="t">mTLS 双向认证</td><td><span class="pill ok">V1</span></td><td>master 内置 CA，证书自动续期</td></tr>
+        <tr><td class="t">健康探测 + 自动选优</td><td><span class="pill ok">V1</span></td><td>核心差异化，5s 内故障切换</td></tr>
+        <tr><td class="t">HTTP / HTTPS L7 反代</td><td><span class="pill later">V1.5</span></td><td>需要 SNI / Host 路由时再做</td></tr>
+        <tr><td class="t">域名 SNI 智能路由</td><td><span class="pill later">V1.5</span></td><td>同上</td></tr>
+        <tr><td class="t">零拷贝 splice(2)</td><td><span class="pill no">不做</span></td><td>家宽带宽是瓶颈，CPU 非瓶颈，先用 tokio copy</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- PHASES -->
+  <section>
+    <h2>路线图 · Roadmap (6 phases · ~21 weeks)</h2>
+    <div id="phases"></div>
+  </section>
+
+  <!-- RISK -->
+  <section>
+    <h2>风险 · Risk Register</h2>
+    <div class="risk">
+      <div class="lvl high">HIGH</div>
+      <div class="body">
+        <div class="title">Rust 入门 + 业余时间，tonic / sqlx / mTLS 学习曲线陡</div>
+        <div class="mit">缓解：P0 预热阶段先做最小 demo（master+node+gRPC ping），过关再进 P1。卡住超 1 周立即评估降级方案。</div>
+      </div>
+    </div>
+    <div class="risk">
+      <div class="lvl mid">MID</div>
+      <div class="body">
+        <div class="title">入口节点带宽成本不可控</div>
+        <div class="mit">缓解：P5 计费上线前必须算清单客户成本，定价覆盖 3 倍带宽成本以应对突发。</div>
+      </div>
+    </div>
+    <div class="risk">
+      <div class="lvl mid">MID</div>
+      <div class="body">
+        <div class="title">多级连跳 N 跳数据面调试复杂</div>
+        <div class="mit">缓解：P1 数据模型 day1 设计为 path 数组而非 in/out 二元；P2 强制 trace ID 贯穿全链路日志。</div>
+      </div>
+    </div>
+    <div class="risk">
+      <div class="lvl low">LOW</div>
+      <div class="body">
+        <div class="title">家宽节点 NAT 穿透 / 断线重连</div>
+        <div class="mit">已确认家宽 IP 固定，简化为标准反向隧道 + 心跳重连，无需 STUN/TURN。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DECISIONS -->
+  <section>
+    <h2>关键决策 · Decision Log</h2>
+    <div class="deci">
+      <div class="when">2026-05-25</div>
+      <div class="q">技术栈：Rust + tonic + axum + PostgreSQL</div>
+      <div class="a">理由：性能 + 内存安全 + 单二进制部署，且参考 relay 已验证可行。</div>
+    </div>
+    <div class="deci">
+      <div class="when">2026-05-25</div>
+      <div class="q">转发内核：tokio copy_bidirectional（不写零拷贝）</div>
+      <div class="a">理由：家宽带宽是瓶颈非 CPU，入门难度大，先够用，性能不足再换 splice(2)。</div>
+    </div>
+    <div class="deci">
+      <div class="when">2026-05-25</div>
+      <div class="q">协议层：L4 透传，不解析任何上层协议</div>
+      <div class="a">理由：客户跑 SS/Trojan/VLESS 是黑盒，对平台等价于普通 TCP 流，工作量收敛。</div>
+    </div>
+    <div class="deci">
+      <div class="when">2026-05-25</div>
+      <div class="q">拓扑：路径数组 path[]，不区分入口/出口角色</div>
+      <div class="a">理由：天然支持任意 N 跳级联，避免后期改数据模型。</div>
+    </div>
+    <div class="deci">
+      <div class="when">2026-05-25</div>
+      <div class="q">差异化：智能调度 + SLA + 拓扑可视化（非纯性能）</div>
+      <div class="a">理由：卷不过 relay 的零拷贝，但 relay 没做"自有节点池 + 自动选优 + SLA 报告"。</div>
+    </div>
+  </section>
+
+  <footer>
+    <span>zhuanfa · roadmap board · 状态保存在浏览器 localStorage</span>
+    <button class="reset" onclick="resetAll()">RESET PROGRESS</button>
+  </footer>
+
+</div>
+
+<script>
+const PHASES = [
+  {
+    id:'p0', code:'P0', weeks:'1-2 周', title:'Rust 预热 · 验证可行性',
+    desc:'写最小 demo 确认你能跟得上技术栈',
+    deliv:'最小 master + node 通过 gRPC mTLS 互通，能发 ping/pong',
+    tasks:[
+      '搭 Cargo workspace（common / master / node / proto 四 crate）',
+      'proto 定义最小 Heartbeat service',
+      'master 端：tonic server，监听 7443，加载/生成 CA 证书',
+      'node 端：tonic client，启动连 master，每 5s 发心跳',
+      'mTLS 跑通：master 签发节点证书并验证客户端',
+      '复盘：如果卡超 1 周，评估降级为 Go 或先用 WebSocket+TLS'
+    ]
+  },
+  {
+    id:'p1', code:'P1', weeks:'4 周', title:'控制骨架 + 数据模型',
+    desc:'master 控制面跑通，CLI 能加规则跑通 2 跳 TCP',
+    deliv:'CLI 添加一条 [入口→出口] TCP 转发规则，客户端能透传到目标',
+    tasks:[
+      'PostgreSQL schema：nodes / forwards (path JSONB) / users',
+      'master：axum HTTP API（节点 CRUD、forward CRUD）',
+      'node：接收 master 推送的 forward 列表',
+      'TCP 数据面：tokio TcpListener + copy_bidirectional',
+      '节点间数据面：gRPC streaming 承载 TCP payload',
+      'CLI 工具：zhuanfa-cli add-forward --path=A,B --listen=10080',
+      '端到端测试：本地 3 个进程模拟 client/A/B 跑通'
+    ]
+  },
+  {
+    id:'p2', code:'P2', weeks:'5 周', title:'反向隧道 + 多跳数据面',
+    desc:'家宽节点适配 + 任意 N 跳支持',
+    deliv:'家宽节点（NAT 后）注册成功，3-5 跳路径稳定运行 TCP + UDP',
+    tasks:[
+      '反向隧道：node 主动连 master，长连接保活',
+      '动态配置下发：forward 改动实时推送到链路上所有节点',
+      'UDP 数据面：tokio UdpSocket + 会话表（5tuple）',
+      '多跳实现：节点间 gRPC stream 承载下一跳，递归级联',
+      '链路断流处理：任一节点掉线立刻通知上游',
+      '日志：trace_id 贯穿 client → 全链路节点',
+      '家宽节点真实环境测试：固定 IP 但 NAT 后'
+    ]
+  },
+  {
+    id:'p3', code:'P3', weeks:'3 周', title:'⭐ 健康探测 + 自动选优',
+    desc:'核心差异化能力，做完即可替换老客户',
+    deliv:'同一 forward 配多备份路径，主路径掉线 5s 内自动切到备份',
+    tasks:[
+      'master：探测调度器，每 30s 对每条链路打探测包',
+      '探测指标：延迟、丢包率、可用率',
+      '路径备份：forward { primary_path, backup_paths[] }',
+      '故障切换：主路径连续失败阈值后自动 failover',
+      'SLA 指标采集：每个转发的 24h / 7d 可用率统计',
+      '指标导出：Prometheus endpoint /metrics'
+    ]
+  },
+  {
+    id:'p4', code:'P4', weeks:'5 周', title:'Web UI + 客户视图',
+    desc:'让产品能见客户。拓扑可视化是亮点',
+    deliv:'admin + 客户双角色 Web UI，含拓扑画布编辑器',
+    tasks:[
+      'React + Vite + shadcn/ui + Tailwind 项目骨架',
+      '登录 + JWT 鉴权（admin / customer 两角色）',
+      'Admin 端：节点管理、转发管理、用户管理',
+      '⭐ 拓扑可视化：React Flow 拖拽编辑 N 跳路径',
+      'SLA 看板：实时延迟图、可用率、流量曲线',
+      'Customer 端：自助查看自己的转发 + SLA 报告',
+      'AI 辅助生成 UI 组件（你不擅长前端）'
+    ]
+  },
+  {
+    id:'p5', code:'P5', weeks:'3 周', title:'计费 + 套餐 + 流量统计',
+    desc:'商业化闭环，自动化收钱',
+    deliv:'客户能自助充值、按套餐用、超额自动暂停',
+    tasks:[
+      '套餐模型：流量配额 / 限速 / 到期时间 / 节点权限',
+      '流量统计：node 端按 forward 累加上报',
+      '配额扣减：master 定时聚合，超额自动暂停 forward',
+      'USDT 收款：监听 TRC20 链上转账自动到账',
+      '支付宝个人收款：扫码 + 备注金额匹配',
+      '订单/账单：充值记录、消费明细导出 CSV',
+      '到期续费提醒：邮件 / TG 通知'
+    ]
+  }
+];
+
+const root = document.getElementById('phases');
+PHASES.forEach((p, idx) => {
+  const tasksHtml = p.tasks.map((t,i) => `
+    <li class="task" data-key="${p.id}_${i}">
+      <input type="checkbox" id="${p.id}_${i}">
+      <label class="text" for="${p.id}_${i}">${t}</label>
+    </li>`).join('');
+  root.insertAdjacentHTML('beforeend', `
+    <div class="phase" data-phase="${p.id}">
+      <div class="phase-head" onclick="togglePhase('${p.id}')">
+        <div class="phase-num">${p.code}</div>
+        <div class="phase-title">
+          <div class="t">${p.title}</div>
+          <div class="d">${p.desc} · ${p.weeks}</div>
+        </div>
+        <div class="phase-meta"><span class="pct" id="pct_${p.id}">0%</span><br><span id="cnt_${p.id}">0/${p.tasks.length}</span></div>
+        <div class="chev">▸</div>
+      </div>
+      <div class="phase-bar"><div class="phase-bar-fill" id="bar_${p.id}"></div></div>
+      <div class="phase-body">
+        <div class="deliv"><b>交付物：</b>${p.deliv}</div>
+        <ul class="tasks">${tasksHtml}</ul>
+      </div>
+    </div>
+  `);
+});
+
+const STORE_KEY = 'zhuanfa_progress_v1';
+function loadState(){ try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } }
+function saveState(s){ localStorage.setItem(STORE_KEY, JSON.stringify(s)); }
+
+function refresh(){
+  const state = loadState();
+  let totalAll=0, doneAll=0;
+  PHASES.forEach(p => {
+    let done=0;
+    p.tasks.forEach((_,i) => {
+      const key = `${p.id}_${i}`;
+      const cb = document.getElementById(key);
+      if (state[key]) { cb.checked = true; done++; }
+      else cb.checked = false;
+    });
+    const total = p.tasks.length;
+    const pct = total ? Math.round(done/total*100) : 0;
+    document.getElementById('pct_'+p.id).textContent = pct+'%';
+    document.getElementById('cnt_'+p.id).textContent = `${done}/${total}`;
+    document.getElementById('bar_'+p.id).style.width = pct+'%';
+    document.querySelector(`[data-phase="${p.id}"]`).classList.toggle('done', done===total && total>0);
+    totalAll += total; doneAll += done;
+  });
+  const globalPct = totalAll ? Math.round(doneAll/totalAll*100) : 0;
+  document.getElementById('globalBar').style.width = globalPct+'%';
+  document.getElementById('globalPct').textContent = globalPct+'%';
+  document.getElementById('globalCount').textContent = `${doneAll}/${totalAll} tasks`;
+}
+
+document.addEventListener('change', e => {
+  if (e.target.type === 'checkbox' && e.target.id) {
+    const state = loadState();
+    if (e.target.checked) state[e.target.id] = 1;
+    else delete state[e.target.id];
+    saveState(state);
+    refresh();
+  }
+});
+
+function togglePhase(id){
+  document.querySelector(`[data-phase="${id}"]`).classList.toggle('open');
+}
+
+function resetAll(){
+  if (!confirm('Reset all progress? This cannot be undone.')) return;
+  localStorage.removeItem(STORE_KEY);
+  refresh();
+}
+
+// 默认展开 P0
+document.querySelector('[data-phase="p0"]').classList.add('open');
+refresh();
+</script>
+</body>
+</html>

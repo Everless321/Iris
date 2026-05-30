@@ -1,0 +1,5 @@
+target
+certs
+.git
+*.pem
+.DS_Store
