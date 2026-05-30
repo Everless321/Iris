@@ -1,0 +1,69 @@
+syntax = "proto3";
+package control;
+
+// 主控 <-> 节点 控制面
+service Control {
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatReply);
+  // 节点拉取与自己相关的转发配置（P1 用 pull，P2/P3 升级为 push stream）
+  rpc SyncConfig (SyncRequest) returns (SyncReply);
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  uint64 seq = 2;
+  double load = 3;
+}
+message HeartbeatReply {
+  uint64 server_time = 1;
+  string message = 2;
+}
+
+message SyncRequest {
+  string node_id = 1;
+}
+message SyncReply {
+  repeated ForwardRule forwards = 1;
+  repeated NodeAddr nodes = 2; // 全量节点地址表，供节点解析下一跳
+}
+message NodeAddr {
+  string id = 1;
+  string addr = 2;       // 节点 DataPlane 可达地址 host:port
+  string health = 3;     // healthy | unhealthy | unknown
+  uint32 latency_ms = 4; // 最近探测 RTT（0 表示未知）
+}
+
+message ForwardRule {
+  int64 id = 1;
+  uint32 listen_port = 2;
+  string protocol = 3;
+  repeated Hop hops = 4;    // 每一跳为一个节点组，组内负载均衡
+  string target = 5;        // 最终目标 host:port
+  bool enabled = 6;
+}
+
+message Hop {
+  string strategy = 1;          // weighted | source_hash | least_conn | latency
+  repeated HopNode nodes = 2;
+}
+message HopNode {
+  string id = 1;
+  uint32 weight = 2;
+}
+
+// 节点间数据面：双向流承载透传字节，递归支持 N 跳
+service DataPlane {
+  rpc Tunnel (stream Chunk) returns (stream Chunk);
+}
+
+message Chunk {
+  // 仅首帧携带 header，声明本条隧道的去向；其余帧为 data。
+  TunnelHeader header = 1;
+  bytes data = 2;
+}
+message TunnelHeader {
+  repeated Hop remaining_hops = 1; // 还需经过的节点组（不含当前节点），各跳分布式选路+failover
+  string target = 2;              // 最终目标 host:port
+  string client_ip = 3;           // 客户端源IP，供 source_hash 各跳一致
+  int64 forward_id = 4;           // 转发ID，隔离 LB 游标
+  uint32 hop_index = 5;           // 当前 hop 序号，隔离 LB 游标
+}

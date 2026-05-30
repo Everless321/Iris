@@ -1,0 +1,15 @@
+[package]
+name = "zhuanfa-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zhuanfa-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+ureq.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

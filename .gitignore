@@ -1,0 +1,8 @@
+/target
+/certs
+/data
+.claude/
+*.pem
+*.db
+*.db-*
+.DS_Store

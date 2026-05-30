@@ -1,0 +1,18 @@
+[package]
+name = "zhuanfa-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zhuanfa-node"
+path = "src/main.rs"
+
+[dependencies]
+zhuanfa-proto = { path = "../proto" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
