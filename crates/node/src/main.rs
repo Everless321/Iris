@@ -1,6 +1,7 @@
 mod dataplane;
 mod forward;
 mod lb;
+mod sock;
 mod udp_forward;
 
 use anyhow::Result;
