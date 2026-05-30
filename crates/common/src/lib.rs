@@ -3,7 +3,36 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
 };
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+
+/// 写文件并强制权限。在 Unix 上使用指定模式；其他平台用默认。
+fn write_with_mode(path: &str, content: &str, mode: u32) -> Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut f = opts.open(path).with_context(|| format!("open {path}"))?;
+    f.write_all(content.as_bytes())?;
+    Ok(())
+}
+
+/// 创建目录并设置权限（仅 owner 可访问）
+fn create_secure_dir(dir: &str) -> Result<()> {
+    let mut b = fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir).with_context(|| format!("create dir {dir}"))
+}
 
 pub struct CertPaths {
     pub ca: String,
@@ -42,7 +71,7 @@ pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
     if paths.ctrl_exists() && Path::new(&paths.ca_key).exists() {
         return Ok(paths);
     }
-    fs::create_dir_all(dir).with_context(|| format!("create cert dir {dir}"))?;
+    create_secure_dir(dir)?;
 
     // CA
     let ca_key = KeyPair::generate().context("gen ca key")?;
@@ -56,12 +85,13 @@ pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
     let (server_pem, server_key_pem) = leaf(&san, "zhuanfa-master", &ca_cert, &ca_key)?;
     let (client_pem, client_key_pem) = leaf(&san, "zhuanfa-node", &ca_cert, &ca_key)?;
 
+    // 证书(public)用默认 644；私钥严格 600（CA 私钥泄露 → 整个信任链失守）
     fs::write(&paths.ca, ca_cert.pem())?;
-    fs::write(&paths.ca_key, ca_key.serialize_pem())?;
+    write_with_mode(&paths.ca_key, &ca_key.serialize_pem(), 0o600)?;
     fs::write(&paths.server, server_pem)?;
-    fs::write(&paths.server_key, server_key_pem)?;
+    write_with_mode(&paths.server_key, &server_key_pem, 0o600)?;
     fs::write(&paths.client, client_pem)?;
-    fs::write(&paths.client_key, client_key_pem)?;
+    write_with_mode(&paths.client_key, &client_key_pem, 0o600)?;
     Ok(paths)
 }
 
