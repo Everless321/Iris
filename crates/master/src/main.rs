@@ -205,6 +205,7 @@ async fn main() -> Result<()> {
         register_rl: std::sync::Arc::new(ratelimit::RateLimiter::new(
             std::time::Duration::from_secs(3600), 3,
         )),
+        cert_dir: cert_dir(),
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");

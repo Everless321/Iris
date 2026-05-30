@@ -15,7 +15,7 @@ prost = "0.13"
 axum = "0.7"
 tonic-build = "0.12"
 protoc-bin-vendored = "3"
-rcgen = "0.13"
+rcgen = { version = "0.13", features = ["x509-parser"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
