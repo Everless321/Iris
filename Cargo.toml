@@ -2,6 +2,11 @@
 resolver = "2"
 members = ["crates/proto", "crates/common", "crates/master", "crates/node", "crates/cli"]
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

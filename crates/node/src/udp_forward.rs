@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::dataplane::{connect_next, NodeCtx, TargetRouter, UDP_BUF};
 use crate::lb::{ConnGuard, LoadBalancer};
+use crate::sock;
 use zhuanfa_proto::control::{Chunk, Hop, TargetEndpoint};
 
 const SESSION_IDLE_MS: i64 = 60_000;
@@ -62,7 +63,8 @@ pub async fn run_udp_single_hop(
     target_strategy: String,
     target_router: Arc<TargetRouter>,
 ) -> Result<()> {
-    let sock = Arc::new(UdpSocket::bind(("0.0.0.0", listen_port)).await?);
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
+    let sock = Arc::new(sock::udp_bind(bind_addr)?);
     tracing::info!(
         listen_port,
         targets = targets.len(),
@@ -101,7 +103,8 @@ pub async fn run_udp_single_hop(
                 continue;
             }
         };
-        let out = match UdpSocket::bind("0.0.0.0:0").await {
+        let out_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let out = match sock::udp_bind(out_bind) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "udp out bind");
@@ -189,7 +192,8 @@ pub async fn run_udp_multi_hop(
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
 ) -> Result<()> {
-    let sock = Arc::new(UdpSocket::bind(("0.0.0.0", listen_port)).await?);
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
+    let sock = Arc::new(sock::udp_bind(bind_addr)?);
     tracing::info!(
         listen_port,
         hops = hops.len(),

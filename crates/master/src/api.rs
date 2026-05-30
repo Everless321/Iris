@@ -612,10 +612,10 @@ pub struct TestResponse {
 /// 安全校验：拒绝 target 解析到回环/内网/链路本地/多播/广播/未指定 等地址，
 /// 防止认证用户用本端点把节点群当端口扫描器去扫主控/节点本机或它们所处的内网。
 /// 设置 `ZF_ALLOW_PRIVATE_TARGETS=1` 可在开发环境放行。
-async fn check_external_target(addr: &str) -> Result<(), ApiErr> {
-    if std::env::var("ZF_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1") {
-        return Ok(());
-    }
+///
+/// 返回 pinned 的 `ip:port` 字符串：调用方应把这个值发给 node，避免 node 端二次
+/// DNS 解析时被 DNS rebinding 切到内网地址（TOCTOU）。
+async fn check_external_target(addr: &str) -> Result<String, ApiErr> {
     let resolved: Vec<SocketAddr> = match tokio::net::lookup_host(addr).await {
         Ok(it) => it.collect(),
         Err(e) => return Err(bad(&format!("无法解析目标地址: {e}"))),
@@ -623,35 +623,48 @@ async fn check_external_target(addr: &str) -> Result<(), ApiErr> {
     if resolved.is_empty() {
         return Err(bad("无法解析目标地址"));
     }
-    for sa in &resolved {
-        if is_disallowed_ip(&sa.ip()) {
-            return Err(bad(&format!(
-                "禁止指向回环/内网/链路本地地址: {} (解析自 {addr})",
-                sa.ip()
-            )));
+    let allow_private = std::env::var("ZF_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1");
+    if !allow_private {
+        for sa in &resolved {
+            if is_disallowed_ip(&sa.ip()) {
+                return Err(bad(&format!(
+                    "禁止指向回环/内网/链路本地地址: {} (解析自 {addr})",
+                    sa.ip()
+                )));
+            }
         }
     }
-    Ok(())
+    // 返回第一条解析结果的 ip:port 形式（v6 自动 [::1]:port）。
+    // node 端 TcpStream::connect 看到字面 IP 就不会再走 DNS，杜绝 rebinding。
+    Ok(resolved[0].to_string())
 }
 
 fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
     use std::net::IpAddr;
+    // IPv4-mapped IPv6（::ffff:127.0.0.1 之类）折回 v4 复用规则，防绕过
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(*v6)),
+        v => *v,
+    };
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_multicast()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
+                || o[0] == 0              // 0.0.0.0/8 "this network"
+                || (o[0] & 0xf0) == 0xe0  // 224.0.0.0/4 multicast (冗余兜底)
         }
         IpAddr::V6(v6) => {
-            let seg0 = v6.segments()[0];
+            let s = v6.segments();
             v6.is_loopback()
                 || v6.is_multicast()
                 || v6.is_unspecified()
-                || (seg0 & 0xfe00) == 0xfc00 // unique local fc00::/7
-                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (s[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
         }
     }
 }
@@ -676,12 +689,13 @@ async fn test_forward(
     if targets.is_empty() {
         return Err(bad("targets 不能为空"));
     }
-    for t in &targets {
+    // SSRF 防护：解析后用 pinned ip:port 替换原始 addr，避免 node 二次 DNS 被 rebinding
+    let mut targets = targets;
+    for t in &mut targets {
         if t.addr.trim().is_empty() {
             return Err(bad("目标地址不能为空"));
         }
-        // SSRF 防护：每个用户输入的 target 都校验
-        check_external_target(&t.addr).await?;
+        t.addr = check_external_target(&t.addr).await?;
     }
 
     // 加载所有相关节点的 addr 一次

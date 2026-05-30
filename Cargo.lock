@@ -3424,6 +3424,7 @@ name = "zhuanfa-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "socket2 0.5.10",
  "tokio",
  "tokio-stream",
  "tonic",

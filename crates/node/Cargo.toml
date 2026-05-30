@@ -16,3 +16,4 @@ tonic.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+socket2 = { version = "0.5", features = ["all"] }

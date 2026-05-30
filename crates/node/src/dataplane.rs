@@ -2,12 +2,14 @@ use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
+use crate::sock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status, Streaming};
@@ -97,7 +99,7 @@ impl Default for TargetRouter {
     }
 }
 
-const BUF: usize = 16 * 1024;
+const BUF: usize = 64 * 1024;
 pub(crate) const UDP_BUF: usize = 64 * 1024;
 
 /// 从 TunnelHeader 取出有效目标列表：优先用新字段 targets，
@@ -250,7 +252,8 @@ pub async fn run_multi_hop_entry(
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
 ) -> Result<()> {
-    let l = tokio::net::TcpListener::bind(("0.0.0.0", listen_port)).await?;
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
+    let l = sock::tcp_listen(bind_addr)?;
     tracing::info!(
         listen_port,
         hops = hops.len(),
@@ -261,6 +264,7 @@ pub async fn run_multi_hop_entry(
     let target_strategy = Arc::new(target_strategy);
     loop {
         let (inbound, peer) = l.accept().await?;
+        sock::tune_accepted(&inbound);
         let hops_rest = hops[1..].to_vec();
         let client_ip = peer.ip().to_string();
         let (targets, strategy, ctx, lb) = (
@@ -379,7 +383,7 @@ impl DataPlane for DataPlaneSvc {
                 let mut picked_addr = String::new();
                 let mut last_err = String::from("no targets tried");
                 for addr in &ordered {
-                    match TcpStream::connect(addr).await {
+                    match sock::tcp_connect(addr).await {
                         Ok(s) => {
                             picked_addr = addr.clone();
                             tcp_opt = Some(s);
@@ -432,9 +436,11 @@ impl DataPlane for DataPlaneSvc {
                 let pick = ordered.first().cloned().ok_or_else(|| {
                     Status::unavailable("no usable udp target".to_string())
                 })?;
-                let usock = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| {
-                    Status::unavailable(format!("udp bind: {e}"))
-                })?;
+                let usock = sock::udp_bind(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    0,
+                ))
+                .map_err(|e| Status::unavailable(format!("udp bind: {e}")))?;
                 usock.connect(&pick).await.map_err(|e| {
                     Status::unavailable(format!("udp connect {pick}: {e}"))
                 })?;
