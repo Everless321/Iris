@@ -159,3 +159,63 @@ impl ForwardCreate {
 fn tcp() -> String {
     "tcp".into()
 }
+
+// ---- 用户 / 邀请码 / 鉴权 ----
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct UserRow {
+    pub id: i64,
+    pub username: String,
+    pub password_hash: String,
+    pub role: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserDto {
+    pub id: i64,
+    pub username: String,
+    pub role: String,
+    pub created_at: i64,
+}
+
+impl From<UserRow> for UserDto {
+    fn from(u: UserRow) -> Self {
+        UserDto {
+            id: u.id,
+            username: u.username,
+            role: u.role,
+            created_at: u.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    pub invite_code: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub user: UserDto,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct InviteCode {
+    pub code: String,
+    pub created_by: i64,
+    pub used_by: Option<i64>,
+    pub used_at: Option<i64>,
+    pub created_at: i64,
+}
+
