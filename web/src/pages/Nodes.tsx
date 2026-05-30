@@ -1,19 +1,23 @@
 import { FormEvent, useEffect, useState } from "react";
+import { ArrowUpRight, Copy, Plus, Trash, X, Warning, Check } from "@phosphor-icons/react";
 import { api, type Enrollment, type Node } from "../lib/api";
 
-function HealthPill({ h }: { h: string }) {
-  if (h === "healthy") return <span className="pill-ok">ok</span>;
-  if (h === "unhealthy") return <span className="pill-bad">down</span>;
-  return <span className="pill-warn">{h || "unknown"}</span>;
+function StatusDot({ h }: { h: string }) {
+  if (h === "healthy") return <span className="dot-ok" />;
+  if (h === "unhealthy") return <span className="dot-bad" />;
+  return <span className="dot-unknown" />;
 }
 
-function InstallDialog({
-  enrollment,
-  onClose,
-}: {
-  enrollment: Enrollment;
-  onClose: () => void;
-}) {
+function HealthCell({ h }: { h: string }) {
+  const cls = h === "healthy" ? "tag-ok" : h === "unhealthy" ? "tag-bad" : "tag-muted";
+  return (
+    <span className={`inline-flex items-center ${cls}`}>
+      <StatusDot h={h} /> {h === "healthy" ? "ok" : h === "unhealthy" ? "down" : "unknown"}
+    </span>
+  );
+}
+
+function InstallDialog({ enrollment, onClose }: { enrollment: Enrollment; onClose: () => void }) {
   const masterUrl = `${location.protocol}//${location.host}`;
   const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(location.host);
   const isInsecure = location.protocol === "http:" && !isLocal;
@@ -30,70 +34,76 @@ function InstallDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="card max-w-2xl w-full space-y-4">
-        <div className="flex justify-between items-start">
+    <div className="fixed inset-0 bg-surface-0/80 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+      <div className="w-full max-w-2xl bg-surface-1 border border-line rounded-lg p-8 space-y-6 animate-slide-up">
+        <header className="flex justify-between items-start">
           <div>
-            <div className="text-xs uppercase tracking-[0.18em] text-mute font-mono">
-              一键安装
-            </div>
-            <h2 className="text-xl font-semibold mt-1">
-              节点 <span className="text-accent">{enrollment.node_id}</span> 安装命令
+            <p className="eyebrow">enrollment</p>
+            <h2 className="text-lg tracking-tight font-medium mt-1">
+              Install command for <span className="font-mono text-accent-fg">{enrollment.node_id}</span>
             </h2>
           </div>
-          <button className="btn-secondary !py-1.5 !px-3" onClick={onClose}>
-            关闭
+          <button className="text-ink-3 hover:text-ink-0 transition-colors" onClick={onClose}>
+            <X size={18} />
           </button>
-        </div>
-        <p className="text-sm text-dim">
-          在目标服务器上 SSH 登录后，粘贴并执行这条命令。脚本会自动兑换证书、写入配置、启动节点。
+        </header>
+
+        <p className="text-sm text-ink-2 leading-relaxed">
+          SSH 到目标服务器后粘贴执行。脚本会自动兑换证书、写入配置、启动节点。
         </p>
+
         {isInsecure && (
-          <div className="rounded-md border border-danger/40 bg-danger/10 text-danger text-xs p-3 leading-relaxed">
-            ⚠️ <b>不安全的链路</b>：你当前正通过 HTTP 访问 master。如果在公网执行下面命令，
-            CA 私钥会以明文经过中间网络。生产环境请先给 master 套上 HTTPS（反代或直接接管 TLS），
-            并在 master 设置 <span className="font-mono">ZF_REQUIRE_TLS=1</span> 强制拒绝明文 enroll。
+          <div className="border-l-2 border-danger pl-4 py-2 text-xs text-danger leading-relaxed flex gap-2 items-start">
+            <Warning size={14} className="shrink-0 mt-0.5" />
+            <div>
+              <strong className="block mb-1">Insecure channel.</strong>
+              你正通过 HTTP 访问 master。生产部署请套上 HTTPS 并设置{" "}
+              <span className="font-mono">ZF_REQUIRE_TLS=1</span>，否则证书私钥可能在中间链路被截获。
+            </div>
           </div>
         )}
+
         <div className="relative">
-          <pre className="bg-bg border border-line rounded-md p-4 text-xs font-mono text-fg overflow-x-auto whitespace-pre-wrap break-all">
+          <pre className="bg-surface-0 border border-line rounded-md p-4 text-xs font-mono text-ink-1 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">
             {cmd}
           </pre>
-          <button
-            className="btn-primary absolute top-2 right-2 !py-1.5 !px-3 text-xs"
-            onClick={copy}
-          >
-            {copied ? "已复制 ✓" : "复制"}
+          <button className="btn-outline btn-sm absolute top-2 right-2" onClick={copy}>
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+            <span>{copied ? "Copied" : "Copy"}</span>
           </button>
         </div>
-        <div className="text-xs text-mute space-y-1">
-          <div>
-            令牌：<span className="font-mono text-fg">{enrollment.token}</span>
-          </div>
-          <div>有效期至：{expires}</div>
-          <div className="text-warn">
-            ⚠️ 令牌一次性使用 + 24h 失效；过期或丢失请在节点列表点「重发令牌」。
-          </div>
-          <div>
-            首次部署前请把 <span className="font-mono">zhuanfa-node</span> 二进制放到目标机器
-            <span className="font-mono"> /opt/zhuanfa/</span>，或脚本加{" "}
-            <span className="font-mono">--binary &lt;路径&gt;</span> 参数。
-          </div>
-        </div>
+
+        <dl className="grid grid-cols-2 gap-y-2 text-xs">
+          <dt className="text-ink-3">Token</dt>
+          <dd className="font-mono text-ink-1 break-all">{enrollment.token}</dd>
+          <dt className="text-ink-3">Expires</dt>
+          <dd className="font-mono text-ink-1">{expires}</dd>
+        </dl>
+
+        <p className="text-xs text-ink-3 leading-relaxed border-t border-line pt-4">
+          令牌一次性使用 + 24h 失效；过期请在节点行点 <span className="font-mono">Resend</span>。
+          首次部署请把 <span className="font-mono">zhuanfa-node</span> 二进制放到目标
+          <span className="font-mono"> /opt/zhuanfa/</span>，或加 <span className="font-mono">--binary &lt;路径&gt;</span>。
+        </p>
       </div>
     </div>
   );
 }
 
 export default function Nodes() {
-  const [list, setList] = useState<Node[]>([]);
-  const [open, setOpen] = useState(false);
+  const [list, setList] = useState<Node[] | null>(null);
+  const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ id: "", name: "", addr: "", weight: 1 });
   const [err, setErr] = useState("");
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = () => api.get<Node[]>("/api/nodes").then(setList).catch((e) => setErr(e.message));
+  const load = () =>
+    api.get<Node[]>("/api/nodes").then(setList).catch((e) => {
+      setList([]);
+      setErr(e.message);
+    });
+
   useEffect(() => {
     load();
     const t = setInterval(load, 5000);
@@ -109,7 +119,7 @@ export default function Nodes() {
       const tok = await api.post<Enrollment>(`/api/nodes/${form.id}/enrollment`);
       setEnrollment(tok);
       setForm({ id: "", name: "", addr: "", weight: 1 });
-      setOpen(false);
+      setAdding(false);
       load();
     } catch (e: any) {
       setErr(e.message);
@@ -128,7 +138,7 @@ export default function Nodes() {
   }
 
   async function onDel(id: string) {
-    if (!confirm(`删除节点 ${id}?`)) return;
+    if (!confirm(`Delete node ${id}?`)) return;
     try {
       await api.del(`/api/nodes/${id}`);
       load();
@@ -138,131 +148,165 @@ export default function Nodes() {
   }
 
   return (
-    <div className="space-y-6">
-      <header className="flex justify-between items-end">
+    <div className="px-8 py-10 max-w-[1280px] mx-auto space-y-8 animate-slide-up">
+      <header className="flex items-end justify-between">
         <div>
-          <div className="text-xs uppercase tracking-[0.18em] text-mute font-mono">Nodes</div>
-          <h1 className="text-2xl font-semibold mt-1">节点管理</h1>
-          <p className="text-sm text-mute mt-1">
-            添加节点后会生成一键安装命令，直接 SSH 到目标服务器粘贴即可。
+          <p className="eyebrow">nodes</p>
+          <h1 className="text-2xl tracking-tight font-medium mt-1">Nodes</h1>
+          <p className="text-xs text-ink-3 mt-2 max-w-[56ch]">
+            添加节点后会生成一键安装命令。SSH 到目标服务器粘贴即可，每个节点拿到独立 mTLS 证书。
           </p>
         </div>
-        <button className="btn-primary" onClick={() => setOpen(!open)}>
-          {open ? "取消" : "+ 新增节点"}
+        <button className="btn-primary" onClick={() => setAdding((v) => !v)}>
+          {adding ? <X size={14} /> : <Plus size={14} />}
+          <span>{adding ? "Cancel" : "New node"}</span>
         </button>
       </header>
 
-      {open && (
-        <form onSubmit={onAdd} className="card space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+      {adding && (
+        <form
+          onSubmit={onAdd}
+          className="border border-line rounded-md p-6 space-y-5 bg-surface-1/40 animate-slide-up"
+        >
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
+            <Field
+              label="Node ID"
+              hint="全平台唯一短标识"
+              value={form.id}
+              onChange={(v) => setForm({ ...form, id: v })}
+              placeholder="sg-1"
+              required
+            />
+            <Field
+              label="Name"
+              hint="展示用"
+              value={form.name}
+              onChange={(v) => setForm({ ...form, name: v })}
+              placeholder="新加坡入口"
+              required
+            />
+            <Field
+              label="Public address"
+              hint="其它节点连接它的 host:port"
+              value={form.addr}
+              onChange={(v) => setForm({ ...form, addr: v })}
+              placeholder="1.2.3.4:7444"
+              mono
+              required
+            />
             <div>
-              <label className="label">节点 ID</label>
-              <input
-                className="input"
-                required
-                placeholder="例如 sg-1"
-                value={form.id}
-                onChange={(e) => setForm({ ...form, id: e.target.value })}
-              />
-              <div className="text-[10px] text-mute mt-1">全平台唯一短标识</div>
-            </div>
-            <div>
-              <label className="label">名称</label>
-              <input
-                className="input"
-                required
-                placeholder="新加坡入口"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-              />
-              <div className="text-[10px] text-mute mt-1">展示用，给自己看</div>
-            </div>
-            <div>
-              <label className="label">节点公网地址 host:port</label>
-              <input
-                className="input font-mono"
-                required
-                placeholder="1.2.3.4:7444"
-                value={form.addr}
-                onChange={(e) => setForm({ ...form, addr: e.target.value })}
-              />
-              <div className="text-[10px] text-mute mt-1">
-                其他节点连接它用的地址。家宽机填映射后的外网 IP
-              </div>
-            </div>
-            <div>
-              <label className="label">权重</label>
+              <label className="label">Weight</label>
               <input
                 type="number"
-                min="1"
-                className="input"
+                min={1}
+                className="field-box num"
                 value={form.weight}
                 onChange={(e) => setForm({ ...form, weight: parseInt(e.target.value) || 1 })}
               />
-              <div className="text-[10px] text-mute mt-1">带宽大的填高，分流多</div>
+              <p className="text-[10px] text-ink-3 mt-1.5">带宽大的填高</p>
             </div>
           </div>
-          {err && <div className="text-danger text-sm">{err}</div>}
+          {err && <p className="text-danger text-sm">{err}</p>}
           <button className="btn-primary" disabled={busy}>
-            {busy ? "创建中…" : "创建并生成安装命令"}
+            {busy ? "Creating…" : "Create & generate install command"}
           </button>
         </form>
       )}
 
-      <div className="card overflow-x-auto p-0">
-        <table className="w-full text-sm">
-          <thead className="text-xs uppercase tracking-wider text-mute font-mono bg-panel2">
-            <tr>
-              <th className="text-left px-4 py-3">ID</th>
-              <th className="text-left px-4 py-3">名称</th>
-              <th className="text-left px-4 py-3">地址</th>
-              <th className="text-left px-4 py-3">健康</th>
-              <th className="text-left px-4 py-3">延迟</th>
-              <th className="text-left px-4 py-3">权重</th>
-              <th className="text-left px-4 py-3">可用率</th>
-              <th className="px-4 py-3"></th>
-            </tr>
-          </thead>
-          <tbody>
+      {list === null ? (
+        <Skeleton />
+      ) : list.length === 0 ? (
+        <Empty />
+      ) : (
+        <div className="border-t border-line">
+          <div className="grid grid-cols-[0.8fr_1fr_1.5fr_0.7fr_0.6fr_0.5fr_0.7fr_auto] gap-x-4 py-2 px-2 table-h border-b border-line">
+            <span>ID</span>
+            <span>Name</span>
+            <span>Address</span>
+            <span>Health</span>
+            <span>Latency</span>
+            <span>Weight</span>
+            <span>Uptime</span>
+            <span />
+          </div>
+          <ul className="divide-y divide-line">
             {list.map((n) => (
-              <tr key={n.id} className="table-row">
-                <td className="px-4 py-3 font-mono">{n.id}</td>
-                <td className="px-4 py-3">{n.name}</td>
-                <td className="px-4 py-3 font-mono text-dim">{n.addr}</td>
-                <td className="px-4 py-3">
-                  <HealthPill h={n.health} />
-                </td>
-                <td className="px-4 py-3 font-mono">
-                  {n.latency_ms != null ? `${n.latency_ms}ms` : "—"}
-                </td>
-                <td className="px-4 py-3">{n.weight}</td>
-                <td className="px-4 py-3 font-mono text-xs">
-                  {n.probe_total > 0
-                    ? `${((n.probe_ok / n.probe_total) * 100).toFixed(1)}%`
-                    : "—"}
-                </td>
-                <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
-                  <button className="btn-secondary !py-1.5 !px-3 text-xs" onClick={() => regenToken(n.id)}>
-                    重发令牌
-                  </button>
-                  <button className="btn-danger !py-1.5 !px-3 text-xs" onClick={() => onDel(n.id)}>
-                    删除
-                  </button>
-                </td>
-              </tr>
+              <li key={n.id} className="row-hover group">
+                <div className="grid grid-cols-[0.8fr_1fr_1.5fr_0.7fr_0.6fr_0.5fr_0.7fr_auto] gap-x-4 items-center py-3 px-2">
+                  <span className="num text-sm">{n.id}</span>
+                  <span className="text-sm truncate">{n.name}</span>
+                  <span className="num text-xs text-ink-3 truncate">{n.addr}</span>
+                  <HealthCell h={n.health} />
+                  <span className="num text-xs text-ink-2">
+                    {n.latency_ms != null ? `${n.latency_ms}ms` : "—"}
+                  </span>
+                  <span className="num text-xs text-ink-2">{n.weight}</span>
+                  <span className="num text-xs text-ink-2">
+                    {n.probe_total > 0
+                      ? `${((n.probe_ok / n.probe_total) * 100).toFixed(1)}%`
+                      : "—"}
+                  </span>
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button className="btn-outline btn-sm" onClick={() => regenToken(n.id)}>
+                      Resend
+                    </button>
+                    <button className="btn-danger btn-sm" onClick={() => onDel(n.id)} title="删除">
+                      <Trash size={12} />
+                    </button>
+                  </div>
+                </div>
+              </li>
             ))}
-            {list.length === 0 && (
-              <tr>
-                <td colSpan={8} className="text-mute text-center py-8">
-                  暂无节点
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+          </ul>
+        </div>
+      )}
 
       {enrollment && <InstallDialog enrollment={enrollment} onClose={() => setEnrollment(null)} />}
+    </div>
+  );
+}
+
+function Field({
+  label, hint, value, onChange, placeholder, required, mono,
+}: {
+  label: string; hint?: string; value: string;
+  onChange: (v: string) => void; placeholder?: string; required?: boolean; mono?: boolean;
+}) {
+  return (
+    <div>
+      <label className="label">{label}</label>
+      <input
+        className={`field-box ${mono ? "font-mono" : ""}`}
+        required={required}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {hint && <p className="text-[10px] text-ink-3 mt-1.5">{hint}</p>}
+    </div>
+  );
+}
+
+function Skeleton() {
+  return (
+    <ul className="border-t border-line divide-y divide-line">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <li key={i} className="py-4 px-2">
+          <div className="skel h-4 w-1/4 mb-2" />
+          <div className="skel h-3 w-2/3" />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Empty() {
+  return (
+    <div className="border border-dashed border-line rounded-md px-6 py-16 text-center">
+      <p className="text-sm text-ink-1 font-medium">No nodes yet</p>
+      <p className="text-xs text-ink-3 mt-1 max-w-[44ch] mx-auto">
+        添加第一个节点，平台会生成一行安装命令。SSH 到目标服务器粘贴执行就行。
+      </p>
     </div>
   );
 }

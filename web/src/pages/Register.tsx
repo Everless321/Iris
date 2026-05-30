@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { ArrowRight } from "@phosphor-icons/react";
 import { useAuth } from "../lib/auth";
 
 export default function Register() {
@@ -26,40 +27,42 @@ export default function Register() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <form onSubmit={onSubmit} className="card w-full max-w-sm space-y-4">
-        <div>
-          <div className="text-xs uppercase tracking-[0.18em] text-mute font-mono">Register</div>
-          <h1 className="text-2xl font-semibold mt-1">用邀请码注册</h1>
+    <div className="min-h-[100dvh] flex items-center justify-center px-8">
+      <form onSubmit={onSubmit} className="w-full max-w-[320px] animate-slide-up">
+        <p className="eyebrow mb-3">create account</p>
+        <h2 className="text-2xl font-medium tracking-tight mb-8">用邀请码注册</h2>
+
+        <div className="space-y-6">
+          <div>
+            <label className="label">Username <span className="text-ink-3 normal-case">（≥ 3）</span></label>
+            <input className="field" value={u} onChange={(e) => setU(e.target.value)} required autoFocus />
+          </div>
+          <div>
+            <label className="label">Password <span className="text-ink-3 normal-case">（≥ 6）</span></label>
+            <input type="password" className="field" value={p} onChange={(e) => setP(e.target.value)} required />
+          </div>
+          <div>
+            <label className="label">Invite code</label>
+            <input className="field font-mono text-xs" value={code} onChange={(e) => setCode(e.target.value)} required />
+          </div>
+
+          {err && (
+            <p className="text-danger text-sm flex items-start gap-1.5">
+              <span className="block w-1 self-stretch bg-danger rounded-full mt-0.5" />
+              {err}
+            </p>
+          )}
+
+          <button className="btn-primary w-full justify-between" disabled={busy}>
+            <span>{busy ? "Creating…" : "Create account"}</span>
+            <ArrowRight size={14} />
+          </button>
         </div>
-        <div>
-          <label className="label">用户名 (≥3)</label>
-          <input className="input" value={u} onChange={(e) => setU(e.target.value)} required autoFocus />
-        </div>
-        <div>
-          <label className="label">密码 (≥6)</label>
-          <input
-            type="password"
-            className="input"
-            value={p}
-            onChange={(e) => setP(e.target.value)}
-            required
-          />
-        </div>
-        <div>
-          <label className="label">邀请码</label>
-          <input className="input font-mono" value={code} onChange={(e) => setCode(e.target.value)} required />
-        </div>
-        {err && <div className="text-danger text-sm">{err}</div>}
-        <button className="btn-primary w-full" disabled={busy}>
-          {busy ? "注册中…" : "创建账号"}
-        </button>
-        <div className="text-xs text-mute text-center">
+
+        <p className="text-xs text-ink-3 mt-8 text-center">
           已有账号？{" "}
-          <Link to="/login" className="text-accent2 hover:underline">
-            登录
-          </Link>
-        </div>
+          <Link to="/login" className="btn-link">登录</Link>
+        </p>
       </form>
     </div>
   );

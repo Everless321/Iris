@@ -5,6 +5,12 @@ import { api, type Sla } from "../lib/api";
 type Point = { ts: number; latency_ms: number | null; ok: number };
 type Samples = Record<string, Point[]>;
 
+function StatusDot({ h }: { h: string }) {
+  if (h === "healthy") return <span className="dot-ok" />;
+  if (h === "unhealthy") return <span className="dot-bad" />;
+  return <span className="dot-unknown" />;
+}
+
 export default function SlaBoard() {
   const [sla, setSla] = useState<Sla | null>(null);
   const [samples, setSamples] = useState<Samples>({});
@@ -23,89 +29,141 @@ export default function SlaBoard() {
     return () => clearInterval(t);
   }, []);
 
-  if (!sla) return <div className="text-mute">加载中…</div>;
+  if (!sla) return <Skel />;
+
+  const totalFails = sla.nodes.reduce((s, n) => s + n.fail_events, 0);
+  const avgUptime =
+    sla.nodes.length > 0
+      ? (sla.nodes.reduce((s, n) => s + n.uptime, 0) / sla.nodes.length) * 100
+      : null;
 
   return (
-    <div className="space-y-6">
+    <div className="px-8 py-10 max-w-[1400px] mx-auto space-y-12 animate-slide-up">
       <header>
-        <div className="text-xs uppercase tracking-[0.18em] text-mute font-mono">SLA Board</div>
-        <h1 className="text-2xl font-semibold mt-1">服务质量看板</h1>
+        <p className="eyebrow">monitoring</p>
+        <h1 className="text-2xl tracking-tight font-medium mt-1">SLA</h1>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="card">
-          <div className="text-xs text-mute font-mono uppercase">在线节点</div>
-          <div className="text-3xl font-semibold mt-2">
-            <span className="text-accent">{sla.online}</span>
-            <span className="text-mute text-xl"> / {sla.total}</span>
-          </div>
+      {/* Metrics */}
+      <section className="border-t border-line">
+        <div className="grid grid-cols-3 divide-x divide-line">
+          <Stat label="Nodes online" value={`${sla.online}/${sla.total}`} footer="healthy" />
+          <Stat
+            label="Average uptime"
+            value={avgUptime != null ? `${avgUptime.toFixed(2)}%` : "—"}
+            footer="all time"
+          />
+          <Stat label="Fail events" value={totalFails} footer="all time" />
         </div>
-        <div className="card">
-          <div className="text-xs text-mute font-mono uppercase">总故障事件</div>
-          <div className="text-3xl font-semibold mt-2">
-            {sla.nodes.reduce((s, n) => s + n.fail_events, 0)}
-          </div>
-        </div>
-        <div className="card">
-          <div className="text-xs text-mute font-mono uppercase">平均可用率</div>
-          <div className="text-3xl font-semibold mt-2 text-accent">
-            {sla.nodes.length > 0
-              ? (
-                  (sla.nodes.reduce((s, n) => s + n.uptime, 0) / sla.nodes.length) *
-                  100
-                ).toFixed(1) + "%"
-              : "—"}
-          </div>
-        </div>
-      </div>
+      </section>
 
-      <h2 className="text-xs uppercase tracking-[0.18em] text-mute font-mono">节点延迟（近 1 小时）</h2>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {sla.nodes.map((n) => {
-          const pts = (samples[n.id] || []).map((p) => ({
-            t: new Date(p.ts).toLocaleTimeString().slice(0, 5),
-            latency: p.ok ? p.latency_ms : null,
-          }));
-          return (
-            <div key={n.id} className="card">
-              <div className="flex justify-between items-center mb-3">
-                <div>
-                  <div className="font-medium">{n.name}</div>
-                  <div className="text-xs text-mute font-mono">{n.id}</div>
+      {/* Per-node charts */}
+      <section className="space-y-4">
+        <header>
+          <p className="eyebrow">latency</p>
+          <h2 className="text-base tracking-tight font-medium mt-1">Per node · last 1h</h2>
+        </header>
+
+        {sla.nodes.length === 0 ? (
+          <div className="border border-dashed border-line rounded-md px-6 py-16 text-center text-xs text-ink-3">
+            还没有节点
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {sla.nodes.map((n) => {
+              const pts = (samples[n.id] || []).map((p) => ({
+                t: new Date(p.ts).toLocaleTimeString().slice(0, 5),
+                latency: p.ok ? p.latency_ms : null,
+              }));
+              return (
+                <div
+                  key={n.id}
+                  className="border border-line rounded-md p-5 hover:border-line-strong transition-colors"
+                >
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <div className="text-sm font-medium tracking-tight flex items-center gap-2">
+                        <StatusDot h={n.health} /> {n.name}
+                      </div>
+                      <div className="num text-xs text-ink-3 mt-0.5">{n.id}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="num text-lg tracking-tighter">
+                        {(n.uptime * 100).toFixed(1)}
+                        <span className="text-ink-3 text-xs">%</span>
+                      </div>
+                      <div className="eyebrow normal-case tracking-normal text-ink-3 mt-0.5">uptime</div>
+                    </div>
+                  </div>
+
+                  <ResponsiveContainer width="100%" height={140}>
+                    <LineChart data={pts} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
+                      <CartesianGrid stroke="#27272a" strokeDasharray="2 3" vertical={false} />
+                      <XAxis
+                        dataKey="t"
+                        stroke="#52525b"
+                        tick={{ fontSize: 10, fontFamily: "Geist Mono, monospace" }}
+                        tickLine={false}
+                        axisLine={false}
+                        interval="preserveStartEnd"
+                      />
+                      <YAxis
+                        stroke="#52525b"
+                        tick={{ fontSize: 10, fontFamily: "Geist Mono, monospace" }}
+                        tickLine={false}
+                        axisLine={false}
+                        unit="ms"
+                        width={40}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          background: "#18181b",
+                          border: "1px solid #27272a",
+                          fontSize: 11,
+                          borderRadius: 6,
+                        }}
+                        labelStyle={{ color: "#a1a1aa" }}
+                        cursor={{ stroke: "#3f3f46" }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="latency"
+                        stroke="#06b6d4"
+                        strokeWidth={1.5}
+                        dot={false}
+                        connectNulls={false}
+                        isAnimationActive={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
                 </div>
-                <div className="text-right text-xs">
-                  <div className={n.health === "healthy" ? "pill-ok" : "pill-bad"}>{n.health}</div>
-                  <div className="text-dim mt-1 font-mono">{(n.uptime * 100).toFixed(1)}%</div>
-                </div>
-              </div>
-              <ResponsiveContainer width="100%" height={160}>
-                <LineChart data={pts}>
-                  <CartesianGrid stroke="#222933" strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="t"
-                    stroke="#5b6470"
-                    tick={{ fontSize: 10 }}
-                    interval="preserveStartEnd"
-                  />
-                  <YAxis stroke="#5b6470" tick={{ fontSize: 10 }} unit="ms" />
-                  <Tooltip
-                    contentStyle={{ background: "#12161c", border: "1px solid #222933", fontSize: 12 }}
-                    labelStyle={{ color: "#8a93a3" }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="latency"
-                    stroke="#5ad6ff"
-                    strokeWidth={2}
-                    dot={false}
-                    connectNulls={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          );
-        })}
-        {sla.nodes.length === 0 && <div className="text-mute">暂无节点</div>}
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Stat({ label, value, footer }: { label: string; value: string | number; footer: string }) {
+  return (
+    <div className="px-6 py-5 first:pl-0 last:pr-0">
+      <div className="eyebrow">{label}</div>
+      <div className="num text-3xl font-medium tracking-tighter mt-1.5">{value}</div>
+      <div className="eyebrow normal-case tracking-normal text-ink-3 mt-1">{footer}</div>
+    </div>
+  );
+}
+
+function Skel() {
+  return (
+    <div className="px-8 py-10 space-y-12">
+      <div className="skel h-8 w-32" />
+      <div className="grid grid-cols-3 gap-6">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="skel h-24" />
+        ))}
       </div>
     </div>
   );

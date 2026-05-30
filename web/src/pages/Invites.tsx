@@ -1,13 +1,12 @@
 import { useEffect, useState } from "react";
+import { Plus, Copy, Check } from "@phosphor-icons/react";
 import { api, type Invite } from "../lib/api";
 
 export default function Invites() {
-  const [list, setList] = useState<Invite[]>([]);
+  const [list, setList] = useState<Invite[] | null>(null);
   const [copied, setCopied] = useState("");
-  const load = () => api.get<Invite[]>("/api/invites").then(setList).catch(() => {});
-  useEffect(() => {
-    load();
-  }, []);
+  const load = () => api.get<Invite[]>("/api/invites").then(setList).catch(() => setList([]));
+  useEffect(() => { load(); }, []);
 
   async function gen() {
     await api.post("/api/invites");
@@ -21,58 +20,76 @@ export default function Invites() {
   }
 
   return (
-    <div className="space-y-6">
-      <header className="flex justify-between items-end">
+    <div className="px-8 py-10 max-w-[1280px] mx-auto space-y-8 animate-slide-up">
+      <header className="flex items-end justify-between">
         <div>
-          <div className="text-xs uppercase tracking-[0.18em] text-mute font-mono">Invites</div>
-          <h1 className="text-2xl font-semibold mt-1">邀请码</h1>
+          <p className="eyebrow">access</p>
+          <h1 className="text-2xl tracking-tight font-medium mt-1">Invites</h1>
         </div>
         <button className="btn-primary" onClick={gen}>
-          + 生成邀请码
+          <Plus size={14} />
+          <span>New invite</span>
         </button>
       </header>
 
-      <div className="card overflow-x-auto p-0">
-        <table className="w-full text-sm">
-          <thead className="text-xs uppercase tracking-wider text-mute font-mono bg-panel2">
-            <tr>
-              <th className="text-left px-4 py-3">邀请码</th>
-              <th className="text-left px-4 py-3">状态</th>
-              <th className="text-left px-4 py-3">使用者 ID</th>
-              <th className="text-left px-4 py-3">创建时间</th>
-              <th className="px-4 py-3"></th>
-            </tr>
-          </thead>
-          <tbody>
+      {list === null ? (
+        <Skel />
+      ) : list.length === 0 ? (
+        <div className="border border-dashed border-line rounded-md px-6 py-16 text-center">
+          <p className="text-sm text-ink-1 font-medium">No invites yet</p>
+          <p className="text-xs text-ink-3 mt-1">点击 New invite 生成第一个邀请码</p>
+        </div>
+      ) : (
+        <div className="border-t border-line">
+          <div className="grid grid-cols-[2.4fr_0.6fr_0.5fr_1.2fr_auto] gap-x-4 py-2 px-2 table-h border-b border-line">
+            <span>Code</span>
+            <span>Status</span>
+            <span>Used by</span>
+            <span>Created</span>
+            <span />
+          </div>
+          <ul className="divide-y divide-line">
             {list.map((i) => (
-              <tr key={i.code} className="table-row">
-                <td className="px-4 py-3 font-mono text-xs">{i.code}</td>
-                <td className="px-4 py-3">
-                  {i.used_by ? <span className="pill-bad">已用</span> : <span className="pill-ok">未用</span>}
-                </td>
-                <td className="px-4 py-3 font-mono">{i.used_by ?? "—"}</td>
-                <td className="px-4 py-3 text-xs text-dim font-mono">
-                  {new Date(i.created_at).toLocaleString()}
-                </td>
-                <td className="px-4 py-3 text-right">
-                  {!i.used_by && (
-                    <button className="btn-secondary" onClick={() => copy(i.code)}>
-                      {copied === i.code ? "已复制" : "复制"}
-                    </button>
-                  )}
-                </td>
-              </tr>
+              <li key={i.code} className="row-hover group">
+                <div className="grid grid-cols-[2.4fr_0.6fr_0.5fr_1.2fr_auto] gap-x-4 items-center py-3 px-2">
+                  <span className="num text-xs text-ink-1 truncate">{i.code}</span>
+                  <span className={i.used_by ? "tag-muted" : "tag-ok"}>
+                    {i.used_by ? "used" : "available"}
+                  </span>
+                  <span className="num text-xs text-ink-2">{i.used_by ?? "—"}</span>
+                  <span className="num text-xs text-ink-3">
+                    {new Date(i.created_at).toLocaleString()}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {!i.used_by && (
+                      <button
+                        className="btn-outline btn-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => copy(i.code)}
+                      >
+                        {copied === i.code ? <Check size={12} /> : <Copy size={12} />}
+                        <span>{copied === i.code ? "Copied" : "Copy"}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </li>
             ))}
-            {list.length === 0 && (
-              <tr>
-                <td colSpan={5} className="text-mute text-center py-8">
-                  暂无邀请码
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+          </ul>
+        </div>
+      )}
     </div>
+  );
+}
+
+function Skel() {
+  return (
+    <ul className="border-t border-line divide-y divide-line">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <li key={i} className="py-4 px-2">
+          <div className="skel h-4 w-2/3 mb-2" />
+          <div className="skel h-3 w-1/4" />
+        </li>
+      ))}
+    </ul>
   );
 }
