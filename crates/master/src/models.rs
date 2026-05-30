@@ -64,7 +64,8 @@ pub struct Hop {
     pub nodes: Vec<HopNode>,
 }
 
-// 数据库行：hops 以 JSON 文本存储在 path 列
+// 数据库行：hops 以 JSON 文本存储在 path 列。
+// owner_id 由 0004 迁移引入；0=未归属（兼容历史数据），>0=用户 id
 #[derive(Debug, FromRow)]
 pub struct ForwardRow {
     pub id: i64,
@@ -75,6 +76,8 @@ pub struct ForwardRow {
     pub target: String,
     pub enabled: i64,
     pub created_at: i64,
+    #[sqlx(default)]
+    pub owner_id: i64,
 }
 
 impl ForwardRow {
@@ -105,6 +108,7 @@ pub struct Forward {
     pub target: String,
     pub enabled: bool,
     pub created_at: i64,
+    pub owner_id: i64,
 }
 
 impl From<ForwardRow> for Forward {
@@ -119,6 +123,7 @@ impl From<ForwardRow> for Forward {
             target: r.target,
             enabled: r.enabled != 0,
             created_at: r.created_at,
+            owner_id: r.owner_id,
         }
     }
 }

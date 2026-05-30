@@ -27,8 +27,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(401, "未授权");
   }
   if (!res.ok) {
-    const msg = await res.text();
-    throw new ApiError(res.status, msg || res.statusText);
+    const raw = await res.text();
+    // 简单脱敏：后端栈 / SQL 错误 / 文件路径 不应直露给用户
+    const sanitize = (s: string) =>
+      /Traceback|SQLException|panicked at|\.rs:|sqlx|UNIQUE constraint/i.test(s)
+        ? "服务器错误，请稍后重试"
+        : s;
+    throw new ApiError(res.status, sanitize(raw) || res.statusText);
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("content-type") || "";
@@ -39,6 +44,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   get: <T>(p: string) => request<T>("GET", p),
   post: <T>(p: string, body?: unknown) => request<T>("POST", p, body),
+  put: <T>(p: string, body?: unknown) => request<T>("PUT", p, body),
   del: <T>(p: string) => request<T>("DELETE", p),
 };
 

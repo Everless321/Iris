@@ -165,13 +165,12 @@ export default function TopologyEditor() {
     }
     setBusy(true);
     try {
-      await api.post("/api/forwards", {
-        name,
-        listen_port: listen,
-        protocol,
-        hops,
-        target,
-      });
+      const payload = { name, listen_port: listen, protocol, hops, target };
+      if (id) {
+        await api.put(`/api/forwards/${id}`, payload);
+      } else {
+        await api.post("/api/forwards", payload);
+      }
       navigate("/forwards");
     } catch (e: any) {
       setErr(e.message);
@@ -191,9 +190,9 @@ export default function TopologyEditor() {
             {id ? `转发 #${id}` : "新建转发"}
           </h1>
         </div>
-        {!readOnly && !id && (
+        {!readOnly && (
           <button className="btn-primary" disabled={busy} onClick={save}>
-            {busy ? "保存中…" : "保存转发"}
+            {busy ? "保存中…" : id ? "保存修改" : "保存转发"}
           </button>
         )}
       </header>
@@ -203,7 +202,7 @@ export default function TopologyEditor() {
           <label className="label">名称</label>
           <input
             className="input"
-            disabled={!!id}
+            disabled={readOnly}
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -213,7 +212,7 @@ export default function TopologyEditor() {
           <input
             type="number"
             className="input"
-            disabled={!!id}
+            disabled={readOnly}
             value={listen}
             onChange={(e) => setListen(parseInt(e.target.value) || 0)}
           />
@@ -222,7 +221,7 @@ export default function TopologyEditor() {
           <label className="label">协议</label>
           <select
             className="input"
-            disabled={!!id}
+            disabled={readOnly}
             value={protocol}
             onChange={(e) => setProtocol(e.target.value)}
           >
@@ -234,7 +233,7 @@ export default function TopologyEditor() {
           <label className="label">目标 host:port</label>
           <input
             className="input"
-            disabled={!!id}
+            disabled={readOnly}
             placeholder="1.2.3.4:22"
             value={target}
             onChange={(e) => setTarget(e.target.value)}
@@ -247,7 +246,7 @@ export default function TopologyEditor() {
           <h2 className="text-xs uppercase tracking-[0.18em] text-mute font-mono">
             跳路径 (Hops)
           </h2>
-          {!id && (
+          {!readOnly && (
             <button className="btn-secondary" onClick={addHop}>
               + 添加一跳
             </button>
@@ -262,7 +261,7 @@ export default function TopologyEditor() {
               <div className="flex gap-2 items-center">
                 <select
                   className="input !py-1.5 !w-auto !text-xs"
-                  disabled={!!id}
+                  disabled={readOnly}
                   value={h.strategy}
                   onChange={(e) => setHopStrategy(hi, e.target.value)}
                 >
@@ -272,7 +271,7 @@ export default function TopologyEditor() {
                     </option>
                   ))}
                 </select>
-                {!id && hops.length > 1 && (
+                {!readOnly && hops.length > 1 && (
                   <button className="btn-danger !py-1.5 !px-3 text-xs" onClick={() => rmHop(hi)}>
                     删除跳
                   </button>
@@ -290,12 +289,12 @@ export default function TopologyEditor() {
                   <input
                     type="number"
                     min="1"
-                    disabled={!!id}
+                    disabled={readOnly}
                     value={n.weight}
                     onChange={(e) => setNodeWeight(hi, ni, parseInt(e.target.value) || 1)}
                     className="w-14 bg-bg border border-line rounded px-1 py-0.5 text-xs text-fg"
                   />
-                  {!id && (
+                  {!readOnly && (
                     <button
                       className="text-mute hover:text-danger text-sm"
                       onClick={() => rmNode(hi, ni)}
@@ -305,7 +304,7 @@ export default function TopologyEditor() {
                   )}
                 </div>
               ))}
-              {!id && (
+              {!readOnly && (
                 <select
                   className="input !py-1.5 !w-auto !text-xs"
                   value=""

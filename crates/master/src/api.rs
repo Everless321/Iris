@@ -1,11 +1,13 @@
 use axum::{
-    extract::{FromRef, Path, State},
+    extract::{ConnectInfo, FromRef, Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::{hash_password, issue_token, verify_password, AdminClaims, AuthState, Claims};
@@ -13,11 +15,14 @@ use crate::models::{
     AuthResponse, Forward, ForwardCreate, ForwardRow, InviteCode, LoginRequest, Node, NodeCreate,
     RegisterRequest, UserDto, UserRow,
 };
+use crate::ratelimit::RateLimiter;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
     pub auth: AuthState,
+    pub login_rl: Arc<RateLimiter>,
+    pub register_rl: Arc<RateLimiter>,
 }
 
 impl FromRef<AppState> for AuthState {
@@ -42,7 +47,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/:id", axum::routing::delete(delete_node))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
-        .route("/api/forwards/:id", axum::routing::delete(delete_forward))
+        .route(
+            "/api/forwards/:id",
+            put(update_forward).delete(delete_forward),
+        )
         // 邀请码 & 用户管理：admin only
         .route("/api/invites", get(list_invites).post(create_invite))
         .route("/api/users", get(list_users))
@@ -62,19 +70,28 @@ fn now_ms() -> i64 {
 }
 
 type ApiErr = (StatusCode, String);
+/// 对外仅返回通用错误，详情写日志。避免泄露 SQL 错误、文件路径、内部栈。
 fn err<E: std::fmt::Display>(e: E) -> ApiErr {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    tracing::error!(detail = %e, "internal error");
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 fn bad(msg: &str) -> ApiErr {
     (StatusCode::BAD_REQUEST, msg.into())
+}
+fn client_ip(addr: SocketAddr) -> String {
+    addr.ip().to_string()
 }
 
 // ---- 鉴权端点 ----
 
 async fn register(
     State(s): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(r): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, ApiErr> {
+    if !s.register_rl.check(&client_ip(addr)) {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "请求过于频繁，请稍后重试".into()));
+    }
     if r.username.trim().len() < 3 || r.password.len() < 6 {
         return Err(bad("用户名 ≥3 字符，密码 ≥6 字符"));
     }
@@ -125,8 +142,12 @@ async fn register(
 
 async fn login(
     State(s): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(r): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiErr> {
+    if !s.login_rl.check(&client_ip(addr)) {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "登录过于频繁，请稍后重试".into()));
+    }
     let u = sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE username=?")
         .bind(&r.username)
         .fetch_optional(&s.pool)
@@ -187,6 +208,18 @@ async fn delete_node(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiErr> {
+    // 检测是否有转发引用该节点（防止 forwards.path JSON 残留幽灵节点）
+    let refs: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM forwards WHERE path LIKE ?")
+            .bind(format!("%\"{}\"%", id))
+            .fetch_all(&s.pool).await.map_err(err)?;
+    if !refs.is_empty() {
+        let names: Vec<String> = refs.iter().map(|(id, n)| format!("#{id} {n}")).collect();
+        return Err((
+            StatusCode::CONFLICT,
+            format!("还有 {} 条转发引用该节点：{}", refs.len(), names.join(", ")),
+        ));
+    }
     sqlx::query("DELETE FROM nodes WHERE id=?").bind(id).execute(&s.pool).await.map_err(err)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -233,11 +266,67 @@ async fn create_forward(
     )
     .bind(&f.name).bind(f.listen_port).bind(&f.protocol).bind(&hops_json)
     .bind(&f.target).bind(now).bind(claims.sub)
-    .fetch_one(&s.pool).await.map_err(err)?;
+    .fetch_one(&s.pool).await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            (StatusCode::CONFLICT, "该端口已被你的其它转发占用".into())
+        } else {
+            err(e)
+        }
+    })?;
     Ok(Json(Forward {
         id, name: f.name, listen_port: f.listen_port, protocol: f.protocol,
         hops, target: f.target, enabled: true, created_at: now,
+        owner_id: claims.sub,
     }))
+}
+
+/// 编辑转发：admin 可改任意，customer 只能改自己。
+async fn update_forward(
+    claims: Claims,
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Json(f): Json<ForwardCreate>,
+) -> Result<Json<Forward>, ApiErr> {
+    let owner: Option<i64> = sqlx::query_scalar("SELECT owner_id FROM forwards WHERE id=?")
+        .bind(id).fetch_optional(&s.pool).await.map_err(err)?;
+    let owner = owner.ok_or((StatusCode::NOT_FOUND, "转发不存在".into()))?;
+    if !claims.is_admin() && owner != claims.sub {
+        return Err((StatusCode::FORBIDDEN, "无权编辑他人的转发".into()));
+    }
+    let mut hops = f.normalized_hops();
+    if hops.is_empty() || hops.iter().any(|h| h.nodes.is_empty()) {
+        return Err(bad("hops 不能为空，且每跳至少一个节点"));
+    }
+    if f.listen_port < 1 || f.listen_port > 65535 {
+        return Err(bad("listen_port 必须在 1-65535"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for h in &mut hops {
+        for n in &mut h.nodes {
+            n.weight = n.weight.clamp(1, 1000);
+            if !seen.insert(n.id.clone()) {
+                return Err(bad(&format!("节点 {} 在路径中重复（循环路径）", n.id)));
+            }
+        }
+    }
+    let hops_json = serde_json::to_string(&hops).map_err(err)?;
+    sqlx::query(
+        "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=? WHERE id=?",
+    )
+    .bind(&f.name).bind(f.listen_port).bind(&f.protocol).bind(&hops_json)
+    .bind(&f.target).bind(id)
+    .execute(&s.pool).await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            (StatusCode::CONFLICT, "该端口已被同 owner 的其它转发占用".into())
+        } else {
+            err(e)
+        }
+    })?;
+    let row = sqlx::query_as::<_, ForwardRow>("SELECT * FROM forwards WHERE id=?")
+        .bind(id).fetch_one(&s.pool).await.map_err(err)?;
+    Ok(Json(row.into()))
 }
 
 async fn delete_forward(

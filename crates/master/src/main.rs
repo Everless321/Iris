@@ -3,6 +3,7 @@ mod auth;
 mod db;
 mod models;
 mod probe;
+mod ratelimit;
 mod web_assets;
 
 use anyhow::Result;
@@ -37,12 +38,18 @@ fn fail_threshold() -> i64 {
     std::env::var("ZF_FAIL_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(2)
 }
 fn jwt_secret() -> Vec<u8> {
-    // P4 简单方案：env 提供秘钥；缺失则警告并使用临时随机值（重启后旧 token 失效）
+    // 生产建议设置 ZF_JWT_SECRET（≥32 字节高熵）；缺失时用 OsRng 生成 32 字节临时密钥
     if let Ok(s) = std::env::var("ZF_JWT_SECRET") {
+        if s.len() < 16 {
+            tracing::warn!(len = s.len(), "ZF_JWT_SECRET 过短，建议 ≥32 字节");
+        }
         return s.into_bytes();
     }
-    tracing::warn!("ZF_JWT_SECRET 未设置，使用进程内随机秘钥（重启后已有 token 失效）");
-    uuid::Uuid::new_v4().as_bytes().to_vec()
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    let mut k = [0u8; 32];
+    OsRng.fill_bytes(&mut k);
+    tracing::warn!("ZF_JWT_SECRET 未设置，使用进程内 32 字节随机秘钥（重启后已有 token 失效）");
+    k.to_vec()
 }
 fn admin_bootstrap() -> Option<(String, String)> {
     let u = std::env::var("ZF_ADMIN_USER").ok()?;
@@ -163,8 +170,11 @@ async fn main() -> Result<()> {
     let pool = db::init(&db_url()).await?;
     tracing::info!(url = %db_url(), "sqlite ready (migrated)");
 
-    // 首次启动：根据 env 引导 admin 账号
+    // 首次启动：根据 env 引导 admin 账号（与 register 端点同样强制 ≥6 字符密码）
     if let Some((u, p)) = admin_bootstrap() {
+        if p.len() < 6 {
+            anyhow::bail!("ZF_ADMIN_PASS 长度 < 6，拒绝引导 admin");
+        }
         let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE username=?")
             .bind(&u).fetch_one(&pool).await?;
         if exists == 0 {
@@ -185,10 +195,27 @@ async fn main() -> Result<()> {
 
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
-    let app = api::router(api::AppState { pool: pool.clone(), auth: auth_state });
+    let app = api::router(api::AppState {
+        pool: pool.clone(),
+        auth: auth_state,
+        // login: 同 IP 5次/分钟；register: 同 IP 3次/小时
+        login_rl: std::sync::Arc::new(ratelimit::RateLimiter::new(
+            std::time::Duration::from_secs(60), 5,
+        )),
+        register_rl: std::sync::Arc::new(ratelimit::RateLimiter::new(
+            std::time::Duration::from_secs(3600), 3,
+        )),
+    });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
-    let http_task = tokio::spawn(async move { axum::serve(http_listener, app).await });
+    // 注入 ConnectInfo 以便限速器能取到客户端 IP
+    let http_task = tokio::spawn(async move {
+        axum::serve(
+            http_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+    });
 
     // gRPC 控制面（mTLS）
     let dir = cert_dir();

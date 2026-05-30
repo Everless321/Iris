@@ -30,6 +30,7 @@ fn serve(p: &str) -> Option<Response> {
 fn not_found() -> Response {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Body::from("not found"))
         .unwrap()
 }
