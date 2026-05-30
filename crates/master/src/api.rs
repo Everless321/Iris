@@ -4,16 +4,22 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tonic::transport::{ClientTlsConfig, Endpoint};
+use zhuanfa_proto::control::data_plane_client::DataPlaneClient;
+use zhuanfa_proto::control::ProbeReachRequest;
 
 use crate::auth::{hash_password, issue_token, verify_password, AdminClaims, AuthState, Claims};
 use crate::models::{
-    AuthResponse, EnrollRequest, EnrollResponse, EnrollmentToken, Forward, ForwardCreate,
-    ForwardRow, InviteCode, LoginRequest, Node, NodeCreate, RegisterRequest, UserDto, UserRow,
+    parse_protocol, AuthResponse, EnrollRequest, EnrollResponse, EnrollmentToken, Forward,
+    ForwardCreate, ForwardRow, Hop, InviteCode, LoginRequest, Node, NodeCreate, RegisterRequest,
+    TargetEndpoint, UserDto, UserRow,
 };
 use crate::ratelimit::RateLimiter;
 
@@ -24,6 +30,7 @@ pub struct AppState {
     pub login_rl: Arc<RateLimiter>,
     pub register_rl: Arc<RateLimiter>,
     pub cert_dir: String, // master 证书目录，供节点 enrollment 时签发新证书
+    pub node_caller_tls: ClientTlsConfig, // master 反向调用节点 DataPlane 用的 mTLS
 }
 
 impl FromRef<AppState> for AuthState {
@@ -51,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/install.sh", get(install_script))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
+        .route("/api/forwards/test", post(test_forward))
         .route(
             "/api/forwards/:id",
             put(update_forward).delete(delete_forward),
@@ -246,12 +254,24 @@ async fn create_forward(
     State(s): State<AppState>,
     Json(f): Json<ForwardCreate>,
 ) -> Result<Json<Forward>, ApiErr> {
+    let protocol = parse_protocol(&f.protocol)
+        .ok_or_else(|| bad("protocol 必须为 tcp / udp / tcp+udp 之一"))?;
     let mut hops = f.normalized_hops();
     if hops.is_empty() || hops.iter().any(|h| h.nodes.is_empty()) {
         return Err(bad("hops 不能为空，且每跳至少一个节点"));
     }
     if f.listen_port < 1 || f.listen_port > 65535 {
         return Err(bad("listen_port 必须在 1-65535"));
+    }
+    let mut targets = f.normalized_targets();
+    if targets.is_empty() {
+        return Err(bad("至少需要 1 个目标地址"));
+    }
+    for t in &mut targets {
+        if t.addr.trim().is_empty() {
+            return Err(bad("目标地址不能为空"));
+        }
+        t.weight = t.weight.clamp(1, 1000);
     }
     let mut seen = std::collections::HashSet::new();
     for h in &mut hops {
@@ -263,13 +283,14 @@ async fn create_forward(
         }
     }
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
+    let targets_json = serde_json::to_string(&targets).map_err(err)?;
     let now = now_ms();
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO forwards (name,listen_port,protocol,path,target,enabled,created_at,owner_id) \
-         VALUES (?,?,?,?,?,1,?,?) RETURNING id",
+        "INSERT INTO forwards (name,listen_port,protocol,path,target,target_strategy,enabled,created_at,owner_id) \
+         VALUES (?,?,?,?,?,?,1,?,?) RETURNING id",
     )
-    .bind(&f.name).bind(f.listen_port).bind(&f.protocol).bind(&hops_json)
-    .bind(&f.target).bind(now).bind(claims.sub)
+    .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
+    .bind(&targets_json).bind(&f.target_strategy).bind(now).bind(claims.sub)
     .fetch_one(&s.pool).await
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
@@ -279,9 +300,9 @@ async fn create_forward(
         }
     })?;
     Ok(Json(Forward {
-        id, name: f.name, listen_port: f.listen_port, protocol: f.protocol,
-        hops, target: f.target, enabled: true, created_at: now,
-        owner_id: claims.sub,
+        id, name: f.name, listen_port: f.listen_port, protocol,
+        hops, targets, target_strategy: f.target_strategy,
+        enabled: true, created_at: now, owner_id: claims.sub,
     }))
 }
 
@@ -298,12 +319,24 @@ async fn update_forward(
     if !claims.is_admin() && owner != claims.sub {
         return Err((StatusCode::FORBIDDEN, "无权编辑他人的转发".into()));
     }
+    let protocol = parse_protocol(&f.protocol)
+        .ok_or_else(|| bad("protocol 必须为 tcp / udp / tcp+udp 之一"))?;
     let mut hops = f.normalized_hops();
     if hops.is_empty() || hops.iter().any(|h| h.nodes.is_empty()) {
         return Err(bad("hops 不能为空，且每跳至少一个节点"));
     }
     if f.listen_port < 1 || f.listen_port > 65535 {
         return Err(bad("listen_port 必须在 1-65535"));
+    }
+    let mut targets = f.normalized_targets();
+    if targets.is_empty() {
+        return Err(bad("至少需要 1 个目标地址"));
+    }
+    for t in &mut targets {
+        if t.addr.trim().is_empty() {
+            return Err(bad("目标地址不能为空"));
+        }
+        t.weight = t.weight.clamp(1, 1000);
     }
     let mut seen = std::collections::HashSet::new();
     for h in &mut hops {
@@ -315,11 +348,12 @@ async fn update_forward(
         }
     }
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
+    let targets_json = serde_json::to_string(&targets).map_err(err)?;
     sqlx::query(
-        "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=? WHERE id=?",
+        "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=?, target_strategy=? WHERE id=?",
     )
-    .bind(&f.name).bind(f.listen_port).bind(&f.protocol).bind(&hops_json)
-    .bind(&f.target).bind(id)
+    .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
+    .bind(&targets_json).bind(&f.target_strategy).bind(id)
     .execute(&s.pool).await
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
@@ -548,4 +582,223 @@ async fn metrics(State(s): State<AppState>) -> Result<String, ApiErr> {
     o.push_str(&format!("# HELP zhuanfa_nodes_online 在线节点数\n# TYPE zhuanfa_nodes_online gauge\nzhuanfa_nodes_online {online}\n"));
     o.push_str(&format!("# HELP zhuanfa_nodes_total 节点总数\n# TYPE zhuanfa_nodes_total gauge\nzhuanfa_nodes_total {}\n", nodes.len()));
     Ok(o)
+}
+
+// ─── 链路测试：让每条边的 from_node 通过 gRPC ProbeReach 探测 to_addr ───
+#[derive(Debug, Deserialize)]
+pub struct TestRequest {
+    pub hops: Vec<Hop>,
+    // 新格式
+    #[serde(default)]
+    pub targets: Option<Vec<TargetEndpoint>>,
+    // 旧格式：单字符串，自动包成单元素数组
+    #[serde(default)]
+    pub target: Option<String>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeProbe {
+    pub from_node: String,
+    pub to_node: Option<String>, // None 表示 to=target
+    pub to_addr: String,
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub error: String,
+}
+#[derive(Debug, Serialize)]
+pub struct TestResponse {
+    pub results: Vec<EdgeProbe>,
+}
+
+/// 安全校验：拒绝 target 解析到回环/内网/链路本地/多播/广播/未指定 等地址，
+/// 防止认证用户用本端点把节点群当端口扫描器去扫主控/节点本机或它们所处的内网。
+/// 设置 `ZF_ALLOW_PRIVATE_TARGETS=1` 可在开发环境放行。
+async fn check_external_target(addr: &str) -> Result<(), ApiErr> {
+    if std::env::var("ZF_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1") {
+        return Ok(());
+    }
+    let resolved: Vec<SocketAddr> = match tokio::net::lookup_host(addr).await {
+        Ok(it) => it.collect(),
+        Err(e) => return Err(bad(&format!("无法解析目标地址: {e}"))),
+    };
+    if resolved.is_empty() {
+        return Err(bad("无法解析目标地址"));
+    }
+    for sa in &resolved {
+        if is_disallowed_ip(&sa.ip()) {
+            return Err(bad(&format!(
+                "禁止指向回环/内网/链路本地地址: {} (解析自 {addr})",
+                sa.ip()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || (seg0 & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+async fn test_forward(
+    _claims: Claims,
+    State(s): State<AppState>,
+    Json(req): Json<TestRequest>,
+) -> Result<Json<TestResponse>, ApiErr> {
+    // 校验
+    if req.hops.is_empty() || req.hops.iter().any(|h| h.nodes.is_empty()) {
+        return Err(bad("hops 不能为空，且每跳至少一个节点"));
+    }
+    // 归一化目标：新字段优先，旧 target 单串包成单元素
+    let targets: Vec<TargetEndpoint> = if let Some(ts) = req.targets {
+        ts
+    } else if let Some(t) = req.target.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        vec![TargetEndpoint { addr: t.into(), weight: 1 }]
+    } else {
+        Vec::new()
+    };
+    if targets.is_empty() {
+        return Err(bad("targets 不能为空"));
+    }
+    for t in &targets {
+        if t.addr.trim().is_empty() {
+            return Err(bad("目标地址不能为空"));
+        }
+        // SSRF 防护：每个用户输入的 target 都校验
+        check_external_target(&t.addr).await?;
+    }
+
+    // 加载所有相关节点的 addr 一次
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, addr FROM nodes")
+            .fetch_all(&s.pool).await.map_err(err)?;
+    let addr_map: HashMap<String, String> = rows.into_iter().collect();
+
+    // 收集要探测的边：(from_node_id, Option<to_node_id>, to_addr)
+    let mut tasks: Vec<(String, Option<String>, String)> = Vec::new();
+    for i in 0..req.hops.len().saturating_sub(1) {
+        for from in &req.hops[i].nodes {
+            for to in &req.hops[i + 1].nodes {
+                let Some(addr) = addr_map.get(&to.id).cloned() else { continue };
+                tasks.push((from.id.clone(), Some(to.id.clone()), addr));
+            }
+        }
+    }
+    // 最后一跳 → 每个 target（笛卡尔积）
+    if let Some(last) = req.hops.last() {
+        for from in &last.nodes {
+            for tgt in &targets {
+                tasks.push((from.id.clone(), None, tgt.addr.clone()));
+            }
+        }
+    }
+
+    // 并发执行（按 from_node 分桶共享 channel，单 channel 串行调用避免重复建链）
+    let mut by_from: HashMap<String, Vec<(Option<String>, String, usize)>> = HashMap::new();
+    for (i, (from, to, addr)) in tasks.iter().enumerate() {
+        by_from.entry(from.clone()).or_default().push((to.clone(), addr.clone(), i));
+    }
+
+    let mut results: Vec<EdgeProbe> = vec![
+        EdgeProbe {
+            from_node: String::new(), to_node: None, to_addr: String::new(),
+            ok: false, latency_ms: 0, error: String::new(),
+        }; tasks.len()
+    ];
+    let tls = s.node_caller_tls.clone();
+
+    // 整体超时 8s
+    let overall = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut set = tokio::task::JoinSet::new();
+        for (from, items) in by_from.into_iter() {
+            let Some(from_addr) = addr_map.get(&from).cloned() else {
+                for (to, addr, idx) in items {
+                    results[idx] = EdgeProbe {
+                        from_node: from.clone(), to_node: to, to_addr: addr,
+                        ok: false, latency_ms: 0,
+                        error: "节点未注册或无地址".into(),
+                    };
+                }
+                continue;
+            };
+            let tls = tls.clone();
+            let from_id = from.clone();
+            set.spawn(async move {
+                // 建一次 channel，串行 probe 所有目标
+                let ep_res = Endpoint::from_shared(format!("https://{from_addr}"))
+                    .and_then(|e| e.tls_config(tls));
+                let channel_res = match ep_res {
+                    Ok(e) => e.connect_timeout(Duration::from_millis(1500)).connect().await,
+                    Err(e) => Err(e),
+                };
+                let mut probes: Vec<(Option<String>, String, usize, EdgeProbe)> =
+                    Vec::with_capacity(items.len());
+                match channel_res {
+                    Err(e) => {
+                        let detail = format!("{e:?}");
+                        tracing::warn!(node = %from_id, addr = %from_addr, error = %detail, "probe: 连不上节点 gRPC");
+                        let emsg = format!("连不上节点: {e}");
+                        for (to, addr, idx) in items {
+                            probes.push((to.clone(), addr.clone(), idx, EdgeProbe {
+                                from_node: from_id.clone(), to_node: to, to_addr: addr,
+                                ok: false, latency_ms: 0, error: emsg.clone(),
+                            }));
+                        }
+                    }
+                    Ok(channel) => {
+                        let mut client = DataPlaneClient::new(channel);
+                        for (to, addr, idx) in items {
+                            let req = ProbeReachRequest { addr: addr.clone(), timeout_ms: 2000 };
+                            let edge = match client.probe_reach(req).await {
+                                Ok(resp) => {
+                                    let p = resp.into_inner();
+                                    EdgeProbe {
+                                        from_node: from_id.clone(), to_node: to.clone(),
+                                        to_addr: addr.clone(),
+                                        ok: p.ok, latency_ms: p.latency_ms, error: p.error,
+                                    }
+                                }
+                                Err(st) => EdgeProbe {
+                                    from_node: from_id.clone(), to_node: to.clone(),
+                                    to_addr: addr.clone(),
+                                    ok: false, latency_ms: 0,
+                                    error: format!("rpc: {st}"),
+                                },
+                            };
+                            probes.push((to, addr, idx, edge));
+                        }
+                    }
+                }
+                probes
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            let Ok(items) = joined else { continue };
+            for (_to, _addr, idx, edge) in items {
+                results[idx] = edge;
+            }
+        }
+        results
+    }).await;
+
+    match overall {
+        Ok(r) => Ok(Json(TestResponse { results: r })),
+        Err(_) => Err((StatusCode::REQUEST_TIMEOUT, "测试超时（8s）".into())),
+    }
 }

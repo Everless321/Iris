@@ -35,10 +35,17 @@ message NodeAddr {
 message ForwardRule {
   int64 id = 1;
   uint32 listen_port = 2;
-  string protocol = 3;
+  string protocol = 3;      // tcp | udp | tcp+udp（同端口同时转发两种协议）
   repeated Hop hops = 4;    // 每一跳为一个节点组，组内负载均衡
-  string target = 5;        // 最终目标 host:port
+  string target = 5 [deprecated = true]; // 旧单字符串目标，已被 targets 取代
   bool enabled = 6;
+  repeated TargetEndpoint targets = 7; // 出口可达的多个目标，按 target_strategy 选 + failover
+  string target_strategy = 8;          // weighted | source_hash | least_conn | latency
+}
+
+message TargetEndpoint {
+  string addr = 1;   // host:port
+  uint32 weight = 2; // 用于加权策略
 }
 
 message Hop {
@@ -53,6 +60,18 @@ message HopNode {
 // 节点间数据面：双向流承载透传字节，递归支持 N 跳
 service DataPlane {
   rpc Tunnel (stream Chunk) returns (stream Chunk);
+  // 探活：节点对外做 TCP connect 计时，用于链路测试
+  rpc ProbeReach (ProbeReachRequest) returns (ProbeReachReply);
+}
+
+message ProbeReachRequest {
+  string addr = 1;        // 目标 host:port
+  uint32 timeout_ms = 2;  // 0 = 默认 2000
+}
+message ProbeReachReply {
+  bool ok = 1;
+  uint64 latency_ms = 2;  // TCP connect 耗时
+  string error = 3;       // 失败原因
 }
 
 message Chunk {
@@ -62,8 +81,13 @@ message Chunk {
 }
 message TunnelHeader {
   repeated Hop remaining_hops = 1; // 还需经过的节点组（不含当前节点），各跳分布式选路+failover
-  string target = 2;              // 最终目标 host:port
+  string target = 2 [deprecated = true]; // 旧单字符串目标
   string client_ip = 3;           // 客户端源IP，供 source_hash 各跳一致
   int64 forward_id = 4;           // 转发ID，隔离 LB 游标
   uint32 hop_index = 5;           // 当前 hop 序号，隔离 LB 游标
+  repeated TargetEndpoint targets = 6; // 出口选择 + failover
+  string target_strategy = 7;          // 策略名
+  // 非空 → 这是一条 UDP 隧道；该值为入口节点观测到的真实客户端 UDP src ip:port，
+  // 出口节点据此维护反向回包 socket 映射。TCP 隧道留空。
+  string udp_src_addr = 8;
 }

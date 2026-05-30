@@ -1,0 +1,266 @@
+use anyhow::Result;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, RwLock};
+
+use crate::dataplane::{connect_next, NodeCtx, TargetRouter, UDP_BUF};
+use crate::lb::{ConnGuard, LoadBalancer};
+use zhuanfa_proto::control::{Chunk, Hop, TargetEndpoint};
+
+const SESSION_IDLE_MS: i64 = 60_000;
+const GC_INTERVAL: Duration = Duration::from_secs(10);
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// ============================== 单跳 UDP ==============================
+// 入口节点 == 出口节点。每个 src 维护一个 connected 出口 UdpSocket，
+// 反向 recv task 把回包发回原始 src。
+
+struct SingleSession {
+    out: Arc<UdpSocket>,
+    last_seen: AtomicI64,
+}
+
+type SingleMap = Arc<RwLock<HashMap<SocketAddr, Arc<SingleSession>>>>;
+
+fn spawn_single_gc(map: SingleMap) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(GC_INTERVAL).await;
+            let cutoff = now_ms() - SESSION_IDLE_MS;
+            let dead: Vec<SocketAddr> = {
+                let g = map.read().await;
+                g.iter()
+                    .filter(|(_, s)| s.last_seen.load(Ordering::Relaxed) < cutoff)
+                    .map(|(k, _)| *k)
+                    .collect()
+            };
+            if !dead.is_empty() {
+                let mut g = map.write().await;
+                for k in &dead {
+                    g.remove(k);
+                }
+                tracing::debug!(dropped = dead.len(), "udp single sessions gc");
+            }
+        }
+    });
+}
+
+pub async fn run_udp_single_hop(
+    listen_port: u16,
+    forward_id: i64,
+    targets: Vec<TargetEndpoint>,
+    target_strategy: String,
+    target_router: Arc<TargetRouter>,
+) -> Result<()> {
+    let sock = Arc::new(UdpSocket::bind(("0.0.0.0", listen_port)).await?);
+    tracing::info!(
+        listen_port,
+        targets = targets.len(),
+        %target_strategy,
+        "udp entry listening (single-hop)"
+    );
+    let map: SingleMap = Arc::default();
+    spawn_single_gc(map.clone());
+    let targets = Arc::new(targets);
+    let strategy = Arc::new(target_strategy);
+
+    let mut buf = vec![0u8; UDP_BUF];
+    loop {
+        let (n, src) = match sock.recv_from(&mut buf).await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, "udp recv_from");
+                continue;
+            }
+        };
+        let data = buf[..n].to_vec();
+
+        // 命中复用
+        if let Some(s) = map.read().await.get(&src).cloned() {
+            s.last_seen.store(now_ms(), Ordering::Relaxed);
+            let _ = s.out.send(&data).await;
+            continue;
+        }
+
+        // 新会话：选 target → 建出口 socket → 入 map → 起反向 recv task → 发首包
+        let ordered = target_router.order(&targets, &strategy, &src.ip().to_string(), forward_id);
+        let pick = match ordered.first() {
+            Some(p) => p.clone(),
+            None => {
+                tracing::warn!("no udp target");
+                continue;
+            }
+        };
+        let out = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "udp out bind");
+                continue;
+            }
+        };
+        if let Err(e) = out.connect(&pick).await {
+            tracing::warn!(target = %pick, error = %e, "udp out connect");
+            continue;
+        }
+        let out = Arc::new(out);
+        let session = Arc::new(SingleSession {
+            out: out.clone(),
+            last_seen: AtomicI64::new(now_ms()),
+        });
+        map.write().await.insert(src, session.clone());
+        {
+            let (sock_back, out_back, map_back, sess_back, src_back) =
+                (sock.clone(), out.clone(), map.clone(), session.clone(), src);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; UDP_BUF];
+                loop {
+                    match tokio::time::timeout(GC_INTERVAL, out_back.recv(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => {
+                            sess_back.last_seen.store(now_ms(), Ordering::Relaxed);
+                            if sock_back.send_to(&buf[..n], src_back).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => break,
+                        Err(_) => {
+                            if !map_back.read().await.contains_key(&src_back) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        let _ = out.send(&data).await;
+    }
+}
+
+// ============================== 多跳 UDP ==============================
+// 每个 src 一条 mTLS gRPC tunnel。隧道首帧 header.udp_src_addr = src.to_string()，
+// 出口节点据此识别 UDP 路径。
+
+struct MultiSession {
+    tx: mpsc::Sender<Chunk>,
+    last_seen: AtomicI64,
+    _guard: ConnGuard,
+}
+
+type MultiMap = Arc<RwLock<HashMap<SocketAddr, Arc<MultiSession>>>>;
+
+fn spawn_multi_gc(map: MultiMap) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(GC_INTERVAL).await;
+            let cutoff = now_ms() - SESSION_IDLE_MS;
+            let dead: Vec<SocketAddr> = {
+                let g = map.read().await;
+                g.iter()
+                    .filter(|(_, s)| s.last_seen.load(Ordering::Relaxed) < cutoff)
+                    .map(|(k, _)| *k)
+                    .collect()
+            };
+            if !dead.is_empty() {
+                let mut g = map.write().await;
+                for k in &dead {
+                    g.remove(k);
+                }
+                tracing::debug!(dropped = dead.len(), "udp multi sessions gc");
+            }
+        }
+    });
+}
+
+pub async fn run_udp_multi_hop(
+    listen_port: u16,
+    forward_id: i64,
+    hops: Vec<Hop>,
+    targets: Vec<TargetEndpoint>,
+    target_strategy: String,
+    ctx: Arc<NodeCtx>,
+    lb: Arc<LoadBalancer>,
+) -> Result<()> {
+    let sock = Arc::new(UdpSocket::bind(("0.0.0.0", listen_port)).await?);
+    tracing::info!(
+        listen_port,
+        hops = hops.len(),
+        targets = targets.len(),
+        "udp entry listening (multi-hop)"
+    );
+    let hops_rest: Vec<Hop> = hops[1..].to_vec();
+    let map: MultiMap = Arc::default();
+    spawn_multi_gc(map.clone());
+
+    let mut buf = vec![0u8; UDP_BUF];
+    loop {
+        let (n, src) = match sock.recv_from(&mut buf).await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, "udp recv_from");
+                continue;
+            }
+        };
+        let data = buf[..n].to_vec();
+
+        // 命中复用
+        if let Some(s) = map.read().await.get(&src).cloned() {
+            s.last_seen.store(now_ms(), Ordering::Relaxed);
+            if s.tx.send(Chunk { header: None, data }).await.is_err() {
+                map.write().await.remove(&src);
+            }
+            continue;
+        }
+
+        // 新会话：起隧道
+        let view = ctx.view();
+        let (mut resp, tx, guard) = match connect_next(
+            &ctx,
+            &lb,
+            &hops_rest,
+            &targets,
+            &target_strategy,
+            &src.ip().to_string(),
+            forward_id,
+            1,
+            &view,
+            &src.to_string(),
+        )
+        .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, %src, "udp tunnel open failed");
+                continue;
+            }
+        };
+        let session = Arc::new(MultiSession {
+            tx: tx.clone(),
+            last_seen: AtomicI64::new(now_ms()),
+            _guard: guard,
+        });
+        map.write().await.insert(src, session.clone());
+        {
+            let (sock_back, map_back, sess_back, src_back) =
+                (sock.clone(), map.clone(), session.clone(), src);
+            tokio::spawn(async move {
+                while let Ok(Some(c)) = resp.message().await {
+                    if !c.data.is_empty() {
+                        sess_back.last_seen.store(now_ms(), Ordering::Relaxed);
+                        let _ = sock_back.send_to(&c.data, src_back).await;
+                    }
+                }
+                map_back.write().await.remove(&src_back);
+            });
+        }
+        let _ = tx.send(Chunk { header: None, data }).await;
+    }
+}

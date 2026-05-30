@@ -10,7 +10,7 @@ services:
       ZF_MASTER_GRPC: "https://host.docker.internal:7443"
       ZF_NODE_ID: "docker-a"
       ZF_DATA_ADDR: "0.0.0.0:7444"
-      ZF_TOKEN: "9330611721274f05858aaf2ace552bec"
+      ZF_TOKEN: "573b61e2aac8427393f8f3817ff6bb5c"
       RUST_LOG: info
     ports:
       - "17444:7444"
@@ -41,7 +41,7 @@ services:
       ZF_MASTER_GRPC: "https://host.docker.internal:7443"
       ZF_NODE_ID: "docker-b1"
       ZF_DATA_ADDR: "0.0.0.0:7444"
-      ZF_TOKEN: "40c499bb041b4c019b95f348dfa0d516"
+      ZF_TOKEN: "53d8915bb3584016b973589c0f6ae0c2"
       RUST_LOG: info
     ports:
       - "17445:7444"
@@ -71,7 +71,7 @@ services:
       ZF_MASTER_GRPC: "https://host.docker.internal:7443"
       ZF_NODE_ID: "docker-b2"
       ZF_DATA_ADDR: "0.0.0.0:7444"
-      ZF_TOKEN: "55f6b91b96014e4db987476b510459d9"
+      ZF_TOKEN: "60412f8d514545cbba78365c79db9165"
       RUST_LOG: info
     ports:
       - "17446:7444"
