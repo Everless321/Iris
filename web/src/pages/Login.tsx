@@ -1,126 +1,125 @@
-import { FormEvent, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight, ShieldCheck, Lock, GraphicsCard } from "@phosphor-icons/react";
+import { Form, Input, Button, Card, Typography, App, Space } from "antd";
+import { LockOutlined, UserOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import { useAuth } from "../lib/auth";
 
+const { Title, Text } = Typography;
+
 export default function Login() {
-  const [u, setU] = useState("");
-  const [p, setP] = useState("");
-  const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
   const login = useAuth((s) => s.login);
+  const { message } = App.useApp();
 
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    setErr("");
+  async function onFinish(v: { username: string; password: string }) {
     setBusy(true);
     try {
-      await login(u, p);
+      await login(v.username, v.password);
+      message.success("登录成功");
       navigate("/", { replace: true });
     } catch (e: any) {
-      setErr(e.message || "登录失败");
+      message.error(e.message || "登录失败");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="min-h-[100dvh] grid grid-cols-1 md:grid-cols-[3fr_2fr]">
-      {/* —— 左侧：品牌叙事（非对称大留白）—— */}
-      <div className="hidden md:flex flex-col justify-between px-16 py-12 border-r border-line">
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-md bg-ink-0 text-surface-0 flex items-center justify-center font-mono text-xs font-bold">
+    <div style={{ minHeight: "100dvh", display: "grid", gridTemplateColumns: "3fr 2fr", background: "#fff" }}>
+      {/* 左侧品牌叙事 */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
+          padding: "48px 56px",
+          background:
+            "linear-gradient(135deg, #1677ff 0%, #0958d9 50%, #003eb3 100%)",
+          color: "#fff",
+        }}
+      >
+        <Space size={10}>
+          <div
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              background: "#fff",
+              color: "#1677ff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontWeight: 700,
+            }}
+          >
             z
           </div>
-          <span className="text-sm tracking-tight">zhuanfa</span>
-        </div>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>Zhuanfa</span>
+        </Space>
 
-        <div className="space-y-6 max-w-[44ch]">
-          <p className="eyebrow">control plane</p>
-          <h1 className="text-4xl tracking-tighter leading-[1.05] font-medium">
-            高性能转发平台<br />
-            <span className="text-ink-3">智能调度 · SLA 承诺</span>
-          </h1>
-          <p className="text-ink-2 text-sm leading-relaxed">
+        <div style={{ maxWidth: 480 }}>
+          <Title level={1} style={{ color: "#fff", marginBottom: 16, letterSpacing: -0.5 }}>
+            高性能转发平台
+          </Title>
+          <Text style={{ color: "rgba(255,255,255,0.85)", fontSize: 16, lineHeight: 1.7 }}>
             基于 Rust 的多级转发控制面。任意 N 跳级联、全链路 mTLS、
             每跳节点组负载均衡、故障自动切换。
-          </p>
+          </Text>
         </div>
 
-        <div className="grid grid-cols-3 gap-x-8 text-xs">
-          <div className="space-y-1">
-            <ShieldCheck size={16} className="text-accent-fg" />
-            <p className="text-ink-1 mt-2">mTLS</p>
-            <p className="text-ink-3">每节点独立证书</p>
-          </div>
-          <div className="space-y-1">
-            <GraphicsCard size={16} className="text-accent-fg" />
-            <p className="text-ink-1 mt-2">Failover</p>
-            <p className="text-ink-3">秒级故障转移</p>
-          </div>
-          <div className="space-y-1">
-            <Lock size={16} className="text-accent-fg" />
-            <p className="text-ink-1 mt-2">Enrollment</p>
-            <p className="text-ink-3">一次性令牌</p>
-          </div>
-        </div>
+        <Space size={28} wrap>
+          <Feature icon={<SafetyCertificateOutlined />} title="mTLS" desc="每节点独立证书" />
+          <Feature icon={<UserOutlined />} title="Failover" desc="秒级故障转移" />
+          <Feature icon={<LockOutlined />} title="Enrollment" desc="一次性令牌注册" />
+        </Space>
       </div>
 
-      {/* —— 右侧：表单（无卡片，靠空间分组）—— */}
-      <div className="flex items-center justify-center px-8 py-12">
-        <form onSubmit={onSubmit} className="w-full max-w-[320px] animate-slide-up">
-          <p className="eyebrow mb-3">sign in</p>
-          <h2 className="text-2xl font-medium tracking-tight mb-8">
-            Welcome back
-          </h2>
+      {/* 右侧表单 */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <Card style={{ width: 380, border: "none", boxShadow: "none" }}>
+          <Title level={3} style={{ marginBottom: 4 }}>欢迎回来</Title>
+          <Text type="secondary">登录到 Zhuanfa 控制面</Text>
 
-          <div className="space-y-6">
-            <div>
-              <label className="label">Username</label>
-              <input
-                className="field"
-                value={u}
-                onChange={(e) => setU(e.target.value)}
-                required
-                autoFocus
-                autoComplete="username"
-              />
-            </div>
+          <Form layout="vertical" onFinish={onFinish} style={{ marginTop: 28 }} requiredMark={false}>
+            <Form.Item
+              name="username"
+              label="用户名"
+              rules={[{ required: true, message: "请输入用户名" }]}
+            >
+              <Input prefix={<UserOutlined />} size="large" placeholder="admin" autoFocus />
+            </Form.Item>
 
-            <div>
-              <label className="label">Password</label>
-              <input
-                type="password"
-                className="field"
-                value={p}
-                onChange={(e) => setP(e.target.value)}
-                required
-                autoComplete="current-password"
-              />
-            </div>
+            <Form.Item
+              name="password"
+              label="密码"
+              rules={[{ required: true, message: "请输入密码" }]}
+            >
+              <Input.Password prefix={<LockOutlined />} size="large" placeholder="••••••••" />
+            </Form.Item>
 
-            {err && (
-              <p className="text-danger text-sm flex items-start gap-1.5">
-                <span className="block w-1 self-stretch bg-danger rounded-full mt-0.5" />
-                {err}
-              </p>
-            )}
+            <Form.Item style={{ marginBottom: 12 }}>
+              <Button type="primary" htmlType="submit" size="large" block loading={busy}>
+                登录
+              </Button>
+            </Form.Item>
 
-            <button className="btn-primary w-full justify-between" disabled={busy}>
-              <span>{busy ? "Signing in…" : "Sign in"}</span>
-              <ArrowRight size={14} />
-            </button>
-          </div>
-
-          <p className="text-xs text-ink-3 mt-8 text-center">
-            没有账号？{" "}
-            <Link to="/register" className="btn-link">
-              用邀请码注册
-            </Link>
-          </p>
-        </form>
+            <Text type="secondary" style={{ display: "block", textAlign: "center", fontSize: 13 }}>
+              没有账号？<Link to="/register">用邀请码注册</Link>
+            </Text>
+          </Form>
+        </Card>
       </div>
+    </div>
+  );
+}
+
+function Feature({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }) {
+  return (
+    <div style={{ minWidth: 110 }}>
+      <div style={{ fontSize: 20, color: "rgba(255,255,255,0.95)", marginBottom: 6 }}>{icon}</div>
+      <div style={{ color: "#fff", fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{title}</div>
+      <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12 }}>{desc}</div>
     </div>
   );
 }
