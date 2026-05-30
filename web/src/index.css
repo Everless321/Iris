@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { font-family: -apple-system, "Inter", "PingFang SC", sans-serif; -webkit-font-smoothing: antialiased; }
+}
+
+@layer components {
+  .input {
+    @apply w-full bg-panel2 border border-line rounded-md px-3 py-2 text-sm text-fg outline-none focus:border-accent2 transition;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition select-none disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary { @apply btn bg-accent text-bg hover:bg-accent/90; }
+  .btn-secondary { @apply btn bg-panel2 border border-line text-fg hover:border-line/60; }
+  .btn-danger { @apply btn text-danger border border-danger/30 hover:bg-danger/10; }
+  .card { @apply bg-panel border border-line rounded-lg p-5; }
+  .label { @apply block text-xs uppercase tracking-wider text-mute font-medium mb-1.5 font-mono; }
+  .pill { @apply inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider; }
+  .pill-ok { @apply pill bg-accent/10 text-accent border border-accent/25; }
+  .pill-warn { @apply pill bg-warn/10 text-warn border border-warn/25; }
+  .pill-bad { @apply pill bg-danger/10 text-danger border border-danger/25; }
+  .table-row { @apply border-b border-line hover:bg-panel2/50 transition; }
+}

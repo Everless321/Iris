@@ -3,6 +3,7 @@ mod auth;
 mod db;
 mod models;
 mod probe;
+mod web_assets;
 
 use anyhow::Result;
 use sqlx::SqlitePool;

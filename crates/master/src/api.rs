@@ -48,8 +48,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users", get(list_users))
         // SLA / 监控
         .route("/api/sla", get(sla))
+        .route("/api/sla/samples", get(sla_samples))
         .route("/metrics", get(metrics))
         .route("/healthz", get(|| async { "ok" }))
+        // 前端静态资源：SPA 兜底，必须放在所有 /api/* 之后
+        .route("/", get(|| crate::web_assets::handler(None)))
+        .route("/*path", get(crate::web_assets::handler))
         .with_state(state)
 }
 
@@ -293,6 +297,29 @@ async fn sla(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {
         "uptime": uptime(n), "fail_events": n.fail_events, "downtime_ms": n.downtime_ms,
     })).collect();
     Ok(Json(json!({ "online": online, "total": nodes.len(), "nodes": items })))
+}
+
+/// 近 1 小时的探测样本，按 node_id 分组。
+async fn sla_samples(
+    _: AdminClaims,
+    State(s): State<AppState>,
+) -> Result<Json<Value>, ApiErr> {
+    let cutoff = now_ms() - 3600 * 1000;
+    let rows: Vec<(String, i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT node_id, ts, ok, latency_ms FROM probe_samples WHERE ts >= ? ORDER BY ts ASC",
+    )
+    .bind(cutoff)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(err)?;
+    let mut grouped: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+    for (node_id, ts, ok, latency) in rows {
+        grouped
+            .entry(node_id)
+            .or_default()
+            .push(json!({ "ts": ts, "ok": ok, "latency_ms": latency }));
+    }
+    Ok(Json(json!(grouped)))
 }
 
 fn esc(s: &str) -> String {

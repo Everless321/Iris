@@ -55,6 +55,22 @@ async fn update_probe(
     fail_threshold: i64,
 ) -> Result<()> {
     let now = now_ms();
+    // 写入探测样本（每节点保留最近 240 条 = 近 1 小时 @ 15s 间隔）
+    sqlx::query("INSERT INTO probe_samples (node_id, ts, ok, latency_ms) VALUES (?,?,?,?)")
+        .bind(id)
+        .bind(now)
+        .bind(if ok { 1 } else { 0 })
+        .bind(if ok { Some(rtt) } else { None })
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM probe_samples WHERE node_id=? AND id NOT IN \
+         (SELECT id FROM probe_samples WHERE node_id=? ORDER BY ts DESC LIMIT 240)",
+    )
+    .bind(id)
+    .bind(id)
+    .execute(pool)
+    .await?;
     let (health, fail_count, down_since): (String, i64, Option<i64>) =
         sqlx::query_as("SELECT health, fail_count, down_since FROM nodes WHERE id=?")
             .bind(id)
