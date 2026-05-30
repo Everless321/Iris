@@ -404,48 +404,68 @@ async fn create_enrollment(
 /// 节点用令牌兑换专属 mTLS 证书（一次性、公开端点、不需要 JWT）。
 async fn enroll_node(
     State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(r): Json<EnrollRequest>,
 ) -> Result<Json<EnrollResponse>, ApiErr> {
-    let row = sqlx::query_as::<_, EnrollmentToken>(
-        "SELECT * FROM node_enrollment_tokens WHERE token=?",
-    )
-    .bind(&r.token).fetch_optional(&s.pool).await.map_err(err)?
-    .ok_or((StatusCode::UNAUTHORIZED, "令牌无效".into()))?;
+    // 安全：生产部署应强制 HTTPS（CA 私钥不应走明文链路）。
+    // ZF_REQUIRE_TLS=1 开启后，非 https 请求一律拒绝。
+    if std::env::var("ZF_REQUIRE_TLS").as_deref() == Ok("1") {
+        let xfp = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok());
+        if xfp != Some("https") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "enrollment 必须经 HTTPS（X-Forwarded-Proto=https），拒绝明文传输证书私钥".into(),
+            ));
+        }
+    }
+    // 原子消费：UPDATE 并校验 rows_affected。失败 = 不存在 / 已用 / 已过期，统一返回 401，防 TOCTOU
     let now = now_ms();
-    if row.used_at.is_some() {
-        return Err((StatusCode::UNAUTHORIZED, "令牌已使用".into()));
+    let res = sqlx::query(
+        "UPDATE node_enrollment_tokens SET used_at=? \
+         WHERE token=? AND used_at IS NULL AND expires_at >= ?",
+    )
+    .bind(now).bind(&r.token).bind(now)
+    .execute(&s.pool).await.map_err(err)?;
+    if res.rows_affected() != 1 {
+        return Err((StatusCode::UNAUTHORIZED, "令牌无效、已使用或已过期".into()));
     }
-    if row.expires_at < now {
-        return Err((StatusCode::UNAUTHORIZED, "令牌已过期".into()));
-    }
-    // 签发节点专属证书（CN=node_id），由 master CA 签发
+    // 取节点 id（消费已确认令牌唯一）
+    let node_id: String = sqlx::query_scalar("SELECT node_id FROM node_enrollment_tokens WHERE token=?")
+        .bind(&r.token).fetch_one(&s.pool).await.map_err(err)?;
+    // 签发节点专属证书
     let (cert_pem, key_pem, ca_pem) =
-        zhuanfa_common::sign_node_cert(&s.cert_dir, &row.node_id).map_err(err)?;
-    sqlx::query("UPDATE node_enrollment_tokens SET used_at=? WHERE token=?")
-        .bind(now).bind(&r.token).execute(&s.pool).await.map_err(err)?;
-    // 拿出节点的注册地址作为 ZF_DATA_ADDR 提示（去掉 host，只保留端口）
+        zhuanfa_common::sign_node_cert(&s.cert_dir, &node_id).map_err(err)?;
+    // 数据面端口提示
     let addr: Option<String> = sqlx::query_scalar("SELECT addr FROM nodes WHERE id=?")
-        .bind(&row.node_id).fetch_optional(&s.pool).await.map_err(err)?;
+        .bind(&node_id).fetch_optional(&s.pool).await.map_err(err)?;
     let data_addr_hint = addr
         .as_deref()
         .and_then(|a| a.rsplit(':').next())
         .map(|port| format!("0.0.0.0:{port}"))
         .unwrap_or_else(|| "0.0.0.0:7444".into());
     Ok(Json(EnrollResponse {
-        node_id: row.node_id,
+        node_id,
         ca_pem, cert_pem, key_pem,
         master_grpc: std::env::var("ZF_PUBLIC_GRPC").unwrap_or_else(|_| "https://127.0.0.1:7443".into()),
         data_addr_hint,
     }))
 }
 
-/// 安装脚本（公开端点，从 master 镜像直接获取）。
-async fn install_script() -> impl axum::response::IntoResponse {
+/// 安装脚本（公开端点）。生产强制 HTTPS 同 enroll 端点。
+async fn install_script(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if std::env::var("ZF_REQUIRE_TLS").as_deref() == Ok("1") {
+        let xfp = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok());
+        if xfp != Some("https") {
+            return (StatusCode::FORBIDDEN, "请使用 HTTPS 访问 /install.sh").into_response();
+        }
+    }
     let body = include_str!("../assets/install-node.sh");
     (
         [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
         body,
     )
+        .into_response()
 }
 
 async fn list_users(_: AdminClaims, State(s): State<AppState>) -> Result<Json<Vec<UserDto>>, ApiErr> {

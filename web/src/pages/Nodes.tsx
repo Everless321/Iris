@@ -15,6 +15,8 @@ function InstallDialog({
   onClose: () => void;
 }) {
   const masterUrl = `${location.protocol}//${location.host}`;
+  const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(location.host);
+  const isInsecure = location.protocol === "http:" && !isLocal;
   const cmd = `curl -fsSL ${masterUrl}/install.sh | bash -s -- \\
   --master ${masterUrl} \\
   --token ${enrollment.token}`;
@@ -46,6 +48,13 @@ function InstallDialog({
         <p className="text-sm text-dim">
           在目标服务器上 SSH 登录后，粘贴并执行这条命令。脚本会自动兑换证书、写入配置、启动节点。
         </p>
+        {isInsecure && (
+          <div className="rounded-md border border-danger/40 bg-danger/10 text-danger text-xs p-3 leading-relaxed">
+            ⚠️ <b>不安全的链路</b>：你当前正通过 HTTP 访问 master。如果在公网执行下面命令，
+            CA 私钥会以明文经过中间网络。生产环境请先给 master 套上 HTTPS（反代或直接接管 TLS），
+            并在 master 设置 <span className="font-mono">ZF_REQUIRE_TLS=1</span> 强制拒绝明文 enroll。
+          </div>
+        )}
         <div className="relative">
           <pre className="bg-bg border border-line rounded-md p-4 text-xs font-mono text-fg overflow-x-auto whitespace-pre-wrap break-all">
             {cmd}
