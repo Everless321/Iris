@@ -63,9 +63,10 @@ async fn update_probe(
         .bind(if ok { Some(rtt) } else { None })
         .execute(pool)
         .await?;
+    // 滚动保留每节点最近 240 条：用游标拿到第 240 条的 ts 做边界，比 NOT IN 子查询更快
     sqlx::query(
-        "DELETE FROM probe_samples WHERE node_id=? AND id NOT IN \
-         (SELECT id FROM probe_samples WHERE node_id=? ORDER BY ts DESC LIMIT 240)",
+        "DELETE FROM probe_samples WHERE node_id=? AND ts < \
+         COALESCE((SELECT ts FROM probe_samples WHERE node_id=? ORDER BY ts DESC LIMIT 1 OFFSET 239), 0)",
     )
     .bind(id)
     .bind(id)

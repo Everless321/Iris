@@ -90,7 +90,8 @@ where
     }
 }
 
-/// 仅 admin 可调用的提取器（在 Claims 基础上额外校验角色）。
+/// 仅 admin 可调用的提取器。除签名/过期外，再查 DB 确认用户存在且当前 role=admin。
+/// 防止用户被删除或降级后旧 token 仍可访问 admin 端点。
 pub struct AdminClaims(pub Claims);
 
 #[axum::async_trait]
@@ -98,15 +99,26 @@ impl<S> FromRequestParts<S> for AdminClaims
 where
     S: Send + Sync,
     AuthState: FromRef<S>,
+    sqlx::SqlitePool: FromRef<S>,
 {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let c = Claims::from_request_parts(parts, state).await?;
-        if c.is_admin() {
-            Ok(AdminClaims(c))
-        } else {
-            Err((StatusCode::FORBIDDEN, "admin only".into()))
+        if !c.is_admin() {
+            return Err((StatusCode::FORBIDDEN, "admin only".into()));
+        }
+        let pool = sqlx::SqlitePool::from_ref(state);
+        let role: Option<String> =
+            sqlx::query_scalar("SELECT role FROM users WHERE id=?")
+                .bind(c.sub)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed".into()))?;
+        match role.as_deref() {
+            Some("admin") => Ok(AdminClaims(c)),
+            Some(_) => Err((StatusCode::FORBIDDEN, "role downgraded".into())),
+            None => Err((StatusCode::UNAUTHORIZED, "user removed".into())),
         }
     }
 }
