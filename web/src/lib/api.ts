@@ -78,6 +78,14 @@ export type Forward = {
   enabled: boolean;
   created_at: number;
 };
+export type Enrollment = {
+  token: string;
+  node_id: string;
+  expires_at: number;
+  used_at: number | null;
+  created_at: number;
+};
+
 export type Invite = {
   code: string;
   created_by: number;

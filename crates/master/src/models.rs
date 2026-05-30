@@ -216,6 +216,30 @@ pub struct AuthResponse {
 }
 
 #[derive(Debug, Serialize, FromRow)]
+pub struct EnrollmentToken {
+    pub token: String,
+    pub node_id: String,
+    pub expires_at: i64,
+    pub used_at: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnrollRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnrollResponse {
+    pub node_id: String,
+    pub ca_pem: String,
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub master_grpc: String,   // 节点该连的 master 控制面地址 host:port
+    pub data_addr_hint: String, // 推荐节点的 ZF_DATA_ADDR
+}
+
+#[derive(Debug, Serialize, FromRow)]
 pub struct InviteCode {
     pub code: String,
     pub created_by: i64,

@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::{hash_password, issue_token, verify_password, AdminClaims, AuthState, Claims};
 use crate::models::{
-    AuthResponse, Forward, ForwardCreate, ForwardRow, InviteCode, LoginRequest, Node, NodeCreate,
-    RegisterRequest, UserDto, UserRow,
+    AuthResponse, EnrollRequest, EnrollResponse, EnrollmentToken, Forward, ForwardCreate,
+    ForwardRow, InviteCode, LoginRequest, Node, NodeCreate, RegisterRequest, UserDto, UserRow,
 };
 use crate::ratelimit::RateLimiter;
 
@@ -23,6 +23,7 @@ pub struct AppState {
     pub auth: AuthState,
     pub login_rl: Arc<RateLimiter>,
     pub register_rl: Arc<RateLimiter>,
+    pub cert_dir: String, // master 证书目录，供节点 enrollment 时签发新证书
 }
 
 impl FromRef<AppState> for AuthState {
@@ -45,6 +46,9 @@ pub fn router(state: AppState) -> Router {
         // 节点：admin only
         .route("/api/nodes", get(list_nodes).post(create_node))
         .route("/api/nodes/:id", axum::routing::delete(delete_node))
+        .route("/api/nodes/:id/enrollment", post(create_enrollment))
+        .route("/api/nodes/enroll", post(enroll_node))
+        .route("/install.sh", get(install_script))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
         .route(
@@ -363,6 +367,85 @@ async fn create_invite(admin: AdminClaims, State(s): State<AppState>) -> Result<
     Ok(Json(InviteCode {
         code, created_by: admin.0.sub, used_by: None, used_at: None, created_at: now,
     }))
+}
+
+// ---- 节点注册令牌 ----
+
+const ENROLL_TTL_MS: i64 = 24 * 3600 * 1000;
+
+/// admin 为指定节点生成一次性注册令牌（24h 有效）。
+async fn create_enrollment(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<EnrollmentToken>, ApiErr> {
+    // 节点必须先存在（admin 先在 UI 加节点 → 再生成令牌）
+    let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes WHERE id=?")
+        .bind(&node_id).fetch_one(&s.pool).await.map_err(err)?;
+    if exists == 0 {
+        return Err((StatusCode::NOT_FOUND, "节点不存在".into()));
+    }
+    // 旧令牌作废（每个节点同时只保留一个有效令牌）
+    sqlx::query("DELETE FROM node_enrollment_tokens WHERE node_id=? AND used_at IS NULL")
+        .bind(&node_id).execute(&s.pool).await.map_err(err)?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let now = now_ms();
+    let expires = now + ENROLL_TTL_MS;
+    sqlx::query(
+        "INSERT INTO node_enrollment_tokens (token, node_id, expires_at, created_at) VALUES (?,?,?,?)",
+    )
+    .bind(&token).bind(&node_id).bind(expires).bind(now)
+    .execute(&s.pool).await.map_err(err)?;
+    Ok(Json(EnrollmentToken {
+        token, node_id, expires_at: expires, used_at: None, created_at: now,
+    }))
+}
+
+/// 节点用令牌兑换专属 mTLS 证书（一次性、公开端点、不需要 JWT）。
+async fn enroll_node(
+    State(s): State<AppState>,
+    Json(r): Json<EnrollRequest>,
+) -> Result<Json<EnrollResponse>, ApiErr> {
+    let row = sqlx::query_as::<_, EnrollmentToken>(
+        "SELECT * FROM node_enrollment_tokens WHERE token=?",
+    )
+    .bind(&r.token).fetch_optional(&s.pool).await.map_err(err)?
+    .ok_or((StatusCode::UNAUTHORIZED, "令牌无效".into()))?;
+    let now = now_ms();
+    if row.used_at.is_some() {
+        return Err((StatusCode::UNAUTHORIZED, "令牌已使用".into()));
+    }
+    if row.expires_at < now {
+        return Err((StatusCode::UNAUTHORIZED, "令牌已过期".into()));
+    }
+    // 签发节点专属证书（CN=node_id），由 master CA 签发
+    let (cert_pem, key_pem, ca_pem) =
+        zhuanfa_common::sign_node_cert(&s.cert_dir, &row.node_id).map_err(err)?;
+    sqlx::query("UPDATE node_enrollment_tokens SET used_at=? WHERE token=?")
+        .bind(now).bind(&r.token).execute(&s.pool).await.map_err(err)?;
+    // 拿出节点的注册地址作为 ZF_DATA_ADDR 提示（去掉 host，只保留端口）
+    let addr: Option<String> = sqlx::query_scalar("SELECT addr FROM nodes WHERE id=?")
+        .bind(&row.node_id).fetch_optional(&s.pool).await.map_err(err)?;
+    let data_addr_hint = addr
+        .as_deref()
+        .and_then(|a| a.rsplit(':').next())
+        .map(|port| format!("0.0.0.0:{port}"))
+        .unwrap_or_else(|| "0.0.0.0:7444".into());
+    Ok(Json(EnrollResponse {
+        node_id: row.node_id,
+        ca_pem, cert_pem, key_pem,
+        master_grpc: std::env::var("ZF_PUBLIC_GRPC").unwrap_or_else(|_| "https://127.0.0.1:7443".into()),
+        data_addr_hint,
+    }))
+}
+
+/// 安装脚本（公开端点，从 master 镜像直接获取）。
+async fn install_script() -> impl axum::response::IntoResponse {
+    let body = include_str!("../assets/install-node.sh");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        body,
+    )
 }
 
 async fn list_users(_: AdminClaims, State(s): State<AppState>) -> Result<Json<Vec<UserDto>>, ApiErr> {
