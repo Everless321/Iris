@@ -9,8 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@phosphor-icons/react": "^2.1.10",
+    "@ant-design/icons": "^6.2.5",
     "@xyflow/react": "^12.3.5",
+    "antd": "^6.4.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.27.0",

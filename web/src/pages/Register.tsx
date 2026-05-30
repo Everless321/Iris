@@ -1,69 +1,72 @@
-import { FormEvent, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight } from "@phosphor-icons/react";
+import { Form, Input, Button, Card, Typography, App } from "antd";
+import { LockOutlined, UserOutlined, KeyOutlined } from "@ant-design/icons";
 import { useAuth } from "../lib/auth";
 
+const { Title, Text } = Typography;
+
 export default function Register() {
-  const [u, setU] = useState("");
-  const [p, setP] = useState("");
-  const [code, setCode] = useState("");
-  const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
   const register = useAuth((s) => s.register);
+  const { message } = App.useApp();
 
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    setErr("");
+  async function onFinish(v: { username: string; password: string; invite_code: string }) {
     setBusy(true);
     try {
-      await register(u, p, code);
+      await register(v.username, v.password, v.invite_code);
+      message.success("注册成功");
       navigate("/", { replace: true });
     } catch (e: any) {
-      setErr(e.message || "注册失败");
+      message.error(e.message || "注册失败");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="min-h-[100dvh] flex items-center justify-center px-8">
-      <form onSubmit={onSubmit} className="w-full max-w-[320px] animate-slide-up">
-        <p className="eyebrow mb-3">create account</p>
-        <h2 className="text-2xl font-medium tracking-tight mb-8">用邀请码注册</h2>
+    <div style={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#f5f5f7" }}>
+      <Card style={{ width: 420 }} bordered>
+        <Title level={3} style={{ marginBottom: 4 }}>用邀请码注册</Title>
+        <Text type="secondary">邀请码由管理员生成，一次性使用</Text>
 
-        <div className="space-y-6">
-          <div>
-            <label className="label">Username <span className="text-ink-3 normal-case">（≥ 3）</span></label>
-            <input className="field" value={u} onChange={(e) => setU(e.target.value)} required autoFocus />
-          </div>
-          <div>
-            <label className="label">Password <span className="text-ink-3 normal-case">（≥ 6）</span></label>
-            <input type="password" className="field" value={p} onChange={(e) => setP(e.target.value)} required />
-          </div>
-          <div>
-            <label className="label">Invite code</label>
-            <input className="field font-mono text-xs" value={code} onChange={(e) => setCode(e.target.value)} required />
-          </div>
+        <Form layout="vertical" onFinish={onFinish} style={{ marginTop: 24 }} requiredMark={false}>
+          <Form.Item
+            name="username"
+            label="用户名"
+            rules={[{ required: true, min: 3, message: "用户名至少 3 个字符" }]}
+          >
+            <Input prefix={<UserOutlined />} size="large" autoFocus />
+          </Form.Item>
 
-          {err && (
-            <p className="text-danger text-sm flex items-start gap-1.5">
-              <span className="block w-1 self-stretch bg-danger rounded-full mt-0.5" />
-              {err}
-            </p>
-          )}
+          <Form.Item
+            name="password"
+            label="密码"
+            rules={[{ required: true, min: 6, message: "密码至少 6 个字符" }]}
+          >
+            <Input.Password prefix={<LockOutlined />} size="large" />
+          </Form.Item>
 
-          <button className="btn-primary w-full justify-between" disabled={busy}>
-            <span>{busy ? "Creating…" : "Create account"}</span>
-            <ArrowRight size={14} />
-          </button>
-        </div>
+          <Form.Item
+            name="invite_code"
+            label="邀请码"
+            rules={[{ required: true, message: "请输入邀请码" }]}
+          >
+            <Input prefix={<KeyOutlined />} size="large" style={{ fontFamily: "JetBrains Mono, monospace" }} />
+          </Form.Item>
 
-        <p className="text-xs text-ink-3 mt-8 text-center">
-          已有账号？{" "}
-          <Link to="/login" className="btn-link">登录</Link>
-        </p>
-      </form>
+          <Form.Item style={{ marginBottom: 12 }}>
+            <Button type="primary" htmlType="submit" size="large" block loading={busy}>
+              创建账号
+            </Button>
+          </Form.Item>
+
+          <Text type="secondary" style={{ display: "block", textAlign: "center", fontSize: 13 }}>
+            已有账号？<Link to="/login">登录</Link>
+          </Text>
+        </Form>
+      </Card>
     </div>
   );
 }

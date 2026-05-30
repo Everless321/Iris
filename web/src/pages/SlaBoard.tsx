@@ -1,14 +1,23 @@
 import { useEffect, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { Card, Row, Col, Statistic, Typography, Skeleton, Empty, Tag, Space } from "antd";
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+} from "recharts";
+import {
+  CheckCircleFilled, MinusCircleFilled, QuestionCircleFilled,
+  CloudServerOutlined, AreaChartOutlined, AlertOutlined,
+} from "@ant-design/icons";
 import { api, type Sla } from "../lib/api";
+
+const { Title, Text } = Typography;
 
 type Point = { ts: number; latency_ms: number | null; ok: number };
 type Samples = Record<string, Point[]>;
 
-function StatusDot({ h }: { h: string }) {
-  if (h === "healthy") return <span className="dot-ok" />;
-  if (h === "unhealthy") return <span className="dot-bad" />;
-  return <span className="dot-unknown" />;
+function HealthTag({ h }: { h: string }) {
+  if (h === "healthy") return <Tag icon={<CheckCircleFilled />} color="success">在线</Tag>;
+  if (h === "unhealthy") return <Tag icon={<MinusCircleFilled />} color="error">离线</Tag>;
+  return <Tag icon={<QuestionCircleFilled />} color="default">未知</Tag>;
 }
 
 export default function SlaBoard() {
@@ -29,142 +38,123 @@ export default function SlaBoard() {
     return () => clearInterval(t);
   }, []);
 
-  if (!sla) return <Skel />;
+  if (!sla) {
+    return (
+      <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+        <Skeleton active />
+      </div>
+    );
+  }
 
   const totalFails = sla.nodes.reduce((s, n) => s + n.fail_events, 0);
   const avgUptime =
     sla.nodes.length > 0
       ? (sla.nodes.reduce((s, n) => s + n.uptime, 0) / sla.nodes.length) * 100
-      : null;
+      : 0;
 
   return (
-    <div className="px-8 py-10 max-w-[1400px] mx-auto space-y-12 animate-slide-up">
-      <header>
-        <p className="eyebrow">monitoring</p>
-        <h1 className="text-2xl tracking-tight font-medium mt-1">SLA</h1>
-      </header>
+    <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+      <div style={{ marginBottom: 24 }}>
+        <Title level={3} style={{ marginBottom: 4 }}>SLA 看板</Title>
+        <Text type="secondary">节点健康状态、可用率、延迟趋势</Text>
+      </div>
 
-      {/* Metrics */}
-      <section className="border-t border-line">
-        <div className="grid grid-cols-3 divide-x divide-line">
-          <Stat label="Nodes online" value={`${sla.online}/${sla.total}`} footer="healthy" />
-          <Stat
-            label="Average uptime"
-            value={avgUptime != null ? `${avgUptime.toFixed(2)}%` : "—"}
-            footer="all time"
-          />
-          <Stat label="Fail events" value={totalFails} footer="all time" />
-        </div>
-      </section>
+      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+        <Col xs={24} md={8}>
+          <Card size="small">
+            <Statistic
+              title={<Space size={6}><CloudServerOutlined />在线节点</Space>}
+              value={sla.online}
+              suffix={`/ ${sla.total}`}
+              valueStyle={{ color: sla.online === sla.total ? "#52c41a" : "#faad14" }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card size="small">
+            <Statistic
+              title={<Space size={6}><AreaChartOutlined />平均可用率</Space>}
+              value={avgUptime}
+              precision={2}
+              suffix="%"
+              valueStyle={{ color: "#1677ff" }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card size="small">
+            <Statistic
+              title={<Space size={6}><AlertOutlined />故障事件</Space>}
+              value={totalFails}
+              valueStyle={{ color: totalFails > 0 ? "#ff4d4f" : undefined }}
+            />
+          </Card>
+        </Col>
+      </Row>
 
-      {/* Per-node charts */}
-      <section className="space-y-4">
-        <header>
-          <p className="eyebrow">latency</p>
-          <h2 className="text-base tracking-tight font-medium mt-1">Per node · last 1h</h2>
-        </header>
-
+      <Card title="节点延迟 · 近 1 小时">
         {sla.nodes.length === 0 ? (
-          <div className="border border-dashed border-line rounded-md px-6 py-16 text-center text-xs text-ink-3">
-            还没有节点
-          </div>
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有节点" />
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Row gutter={[16, 16]}>
             {sla.nodes.map((n) => {
               const pts = (samples[n.id] || []).map((p) => ({
                 t: new Date(p.ts).toLocaleTimeString().slice(0, 5),
                 latency: p.ok ? p.latency_ms : null,
               }));
               return (
-                <div
-                  key={n.id}
-                  className="border border-line rounded-md p-5 hover:border-line-strong transition-colors"
-                >
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <div className="text-sm font-medium tracking-tight flex items-center gap-2">
-                        <StatusDot h={n.health} /> {n.name}
+                <Col xs={24} lg={12} key={n.id}>
+                  <Card size="small" hoverable>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                      <div>
+                        <Space>
+                          <Text strong>{n.name}</Text>
+                          <HealthTag h={n.health} />
+                        </Space>
+                        <div style={{ marginTop: 2 }}>
+                          <Text className="num" type="secondary" style={{ fontSize: 12 }}>{n.id}</Text>
+                        </div>
                       </div>
-                      <div className="num text-xs text-ink-3 mt-0.5">{n.id}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="num text-lg tracking-tighter">
-                        {(n.uptime * 100).toFixed(1)}
-                        <span className="text-ink-3 text-xs">%</span>
+                      <div style={{ textAlign: "right" }}>
+                        <div className="num" style={{ fontSize: 18, fontWeight: 600, color: "#1677ff" }}>
+                          {(n.uptime * 100).toFixed(1)}%
+                        </div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>可用率</Text>
                       </div>
-                      <div className="eyebrow normal-case tracking-normal text-ink-3 mt-0.5">uptime</div>
                     </div>
-                  </div>
-
-                  <ResponsiveContainer width="100%" height={140}>
-                    <LineChart data={pts} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
-                      <CartesianGrid stroke="#27272a" strokeDasharray="2 3" vertical={false} />
-                      <XAxis
-                        dataKey="t"
-                        stroke="#52525b"
-                        tick={{ fontSize: 10, fontFamily: "Geist Mono, monospace" }}
-                        tickLine={false}
-                        axisLine={false}
-                        interval="preserveStartEnd"
-                      />
-                      <YAxis
-                        stroke="#52525b"
-                        tick={{ fontSize: 10, fontFamily: "Geist Mono, monospace" }}
-                        tickLine={false}
-                        axisLine={false}
-                        unit="ms"
-                        width={40}
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          background: "#18181b",
-                          border: "1px solid #27272a",
-                          fontSize: 11,
-                          borderRadius: 6,
-                        }}
-                        labelStyle={{ color: "#a1a1aa" }}
-                        cursor={{ stroke: "#3f3f46" }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="latency"
-                        stroke="#06b6d4"
-                        strokeWidth={1.5}
-                        dot={false}
-                        connectNulls={false}
-                        isAnimationActive={false}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
+                    <ResponsiveContainer width="100%" height={160}>
+                      <LineChart data={pts} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
+                        <CartesianGrid stroke="#f0f0f0" strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="t" stroke="#bfbfbf"
+                          tick={{ fontSize: 10, fontFamily: "JetBrains Mono, monospace" }}
+                          tickLine={false} axisLine={false}
+                          interval="preserveStartEnd"
+                        />
+                        <YAxis
+                          stroke="#bfbfbf"
+                          tick={{ fontSize: 10, fontFamily: "JetBrains Mono, monospace" }}
+                          tickLine={false} axisLine={false} unit="ms" width={40}
+                        />
+                        <Tooltip
+                          contentStyle={{ background: "#fff", border: "1px solid #f0f0f0", fontSize: 12, borderRadius: 6 }}
+                          labelStyle={{ color: "#8c8c8c" }}
+                          cursor={{ stroke: "#1677ff", strokeOpacity: 0.3 }}
+                        />
+                        <Line
+                          type="monotone" dataKey="latency"
+                          stroke="#1677ff" strokeWidth={2}
+                          dot={false} connectNulls={false} isAnimationActive={false}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Card>
+                </Col>
               );
             })}
-          </div>
+          </Row>
         )}
-      </section>
-    </div>
-  );
-}
-
-function Stat({ label, value, footer }: { label: string; value: string | number; footer: string }) {
-  return (
-    <div className="px-6 py-5 first:pl-0 last:pr-0">
-      <div className="eyebrow">{label}</div>
-      <div className="num text-3xl font-medium tracking-tighter mt-1.5">{value}</div>
-      <div className="eyebrow normal-case tracking-normal text-ink-3 mt-1">{footer}</div>
-    </div>
-  );
-}
-
-function Skel() {
-  return (
-    <div className="px-8 py-10 space-y-12">
-      <div className="skel h-8 w-32" />
-      <div className="grid grid-cols-3 gap-6">
-        {[0, 1, 2].map((i) => (
-          <div key={i} className="skel h-24" />
-        ))}
-      </div>
+      </Card>
     </div>
   );
 }
