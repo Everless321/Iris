@@ -1,6 +1,7 @@
 mod dataplane;
 mod forward;
 mod lb;
+mod udp_forward;
 
 use anyhow::Result;
 use dataplane::{DataPlaneSvc, NodeCtx, NodeInfo};
@@ -100,12 +101,15 @@ async fn main() -> Result<()> {
     // LB 由 DataPlane server 与入口共享（中转节点也需 LB 选下一跳）
     let lb = Arc::new(LoadBalancer::new());
 
+    // 出口 target 路由（按 forward_id 维护加权 RR 游标）
+    let target_router = Arc::new(dataplane::TargetRouter::new());
+
     // 起 DataPlane 隧道服务（被上一跳连接）
     {
-        let (ctx, lb) = (ctx.clone(), lb.clone());
+        let (ctx, lb, target_router) = (ctx.clone(), lb.clone(), target_router.clone());
         let dp_addr: SocketAddr = data_addr.parse()?;
         tokio::spawn(async move {
-            let svc = DataPlaneSvc { ctx, lb };
+            let svc = DataPlaneSvc { ctx, lb, target_router };
             if let Err(e) = Server::builder()
                 .tls_config(dp_tls)
                 .expect("dp tls")
@@ -130,23 +134,83 @@ async fn main() -> Result<()> {
             continue;
         }
         let port = f.listen_port as u16;
-        if f.hops.len() == 1 {
-            let target = f.target.clone();
-            tokio::spawn(async move {
-                if let Err(e) = forward::run_single_hop(port, target).await {
-                    tracing::error!(error = %e, "single-hop entry exited");
-                }
-            });
+        // 取出多 target；兼容旧 master 只填了单 target 字符串的情形
+        let targets: Vec<zhuanfa_proto::control::TargetEndpoint> = if !f.targets.is_empty() {
+            f.targets.clone()
         } else {
-            let (hops, target, ctx, lb) =
-                (f.hops.clone(), f.target.clone(), ctx.clone(), lb.clone());
-            tokio::spawn(async move {
-                if let Err(e) =
-                    dataplane::run_multi_hop_entry(port, f.id, hops, target, ctx, lb).await
-                {
-                    tracing::error!(error = %e, "multi-hop entry exited");
-                }
-            });
+            #[allow(deprecated)]
+            let t = f.target.trim().to_string();
+            if t.is_empty() {
+                Vec::new()
+            } else {
+                vec![zhuanfa_proto::control::TargetEndpoint { addr: t, weight: 1 }]
+            }
+        };
+        let target_strategy = if f.target_strategy.is_empty() {
+            "weighted".to_string()
+        } else {
+            f.target_strategy.clone()
+        };
+        if targets.is_empty() {
+            tracing::warn!(forward_id = f.id, "forward 没有 target，跳过 entry 启动");
+            continue;
+        }
+        let fid = f.id;
+        // 协议派发：tcp / udp / tcp+udp 任意组合；空字符串当 tcp（兼容）
+        let parts: Vec<&str> = f
+            .protocol
+            .split('+')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let has_tcp = parts.is_empty() || parts.iter().any(|p| *p == "tcp");
+        let has_udp = parts.iter().any(|p| *p == "udp");
+
+        if has_tcp {
+            if f.hops.len() == 1 {
+                let (t, s) = (targets.clone(), target_strategy.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = forward::run_single_hop(port, fid, t, s).await {
+                        tracing::error!(error = %e, "tcp single-hop entry exited");
+                    }
+                });
+            } else {
+                let (hops, t, s, ctx2, lb2) = (
+                    f.hops.clone(), targets.clone(), target_strategy.clone(),
+                    ctx.clone(), lb.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2).await
+                    {
+                        tracing::error!(error = %e, "tcp multi-hop entry exited");
+                    }
+                });
+            }
+        }
+        if has_udp {
+            if f.hops.len() == 1 {
+                let (t, s, tr) = (
+                    targets.clone(), target_strategy.clone(), target_router.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr).await {
+                        tracing::error!(error = %e, "udp single-hop entry exited");
+                    }
+                });
+            } else {
+                let (hops, t, s, ctx2, lb2) = (
+                    f.hops.clone(), targets.clone(), target_strategy.clone(),
+                    ctx.clone(), lb.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2).await
+                    {
+                        tracing::error!(error = %e, "udp multi-hop entry exited");
+                    }
+                });
+            }
         }
     }
 

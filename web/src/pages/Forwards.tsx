@@ -48,8 +48,11 @@ export default function Forwards() {
       title: "协议",
       dataIndex: "protocol",
       key: "protocol",
-      width: 80,
-      render: (p) => <Tag>{p.toUpperCase()}</Tag>,
+      width: 110,
+      render: (p: string) => {
+        const parts = p.split("+").map((x) => x.trim().toUpperCase()).filter(Boolean);
+        return <>{parts.map((x) => <Tag key={x}>{x}</Tag>)}</>;
+      },
     },
     {
       title: "路径",
@@ -58,10 +61,18 @@ export default function Forwards() {
     },
     {
       title: "目标",
-      dataIndex: "target",
-      key: "target",
-      width: 200,
-      render: (t) => <Text className="num" type="secondary" style={{ fontSize: 12 }}>{t}</Text>,
+      key: "targets",
+      width: 220,
+      render: (_, f) => {
+        const ts = f.targets ?? [];
+        if (ts.length === 0) return <Text type="secondary">—</Text>;
+        const head = ts[0]?.addr ?? "";
+        return (
+          <Text className="num" type="secondary" style={{ fontSize: 12 }}>
+            {head}{ts.length > 1 ? ` +${ts.length - 1}` : ""}
+          </Text>
+        );
+      },
     },
     {
       title: "操作",

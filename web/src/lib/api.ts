@@ -68,13 +68,15 @@ export type Node = {
 };
 export type HopNode = { id: string; weight: number };
 export type Hop = { strategy: string; nodes: HopNode[] };
+export type TargetEndpoint = { addr: string; weight: number };
 export type Forward = {
   id: number;
   name: string;
   listen_port: number;
   protocol: string;
   hops: Hop[];
-  target: string;
+  targets: TargetEndpoint[];
+  target_strategy: string;
   enabled: boolean;
   created_at: number;
 };
@@ -93,6 +95,16 @@ export type Invite = {
   used_at: number | null;
   created_at: number;
 };
+export type EdgeProbe = {
+  from_node: string;
+  to_node: string | null; // null = target
+  to_addr: string;
+  ok: boolean;
+  latency_ms: number;
+  error: string;
+};
+export type TestResponse = { results: EdgeProbe[] };
+
 export type Sla = {
   online: number;
   total: number;

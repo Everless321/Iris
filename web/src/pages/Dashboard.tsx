@@ -159,7 +159,10 @@ function HopsLine({ f }: { f: Forward }) {
         );
       })}
       <span style={{ color: "#bfbfbf", margin: "0 4px" }}>→</span>
-      <Text type="secondary" style={{ fontSize: 12 }}>{f.target}</Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {f.targets?.[0]?.addr ?? "—"}
+        {(f.targets?.length ?? 0) > 1 ? ` +${(f.targets?.length ?? 0) - 1}` : ""}
+      </Text>
     </Space>
   );
 }

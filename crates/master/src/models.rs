@@ -64,6 +64,13 @@ pub struct Hop {
     pub nodes: Vec<HopNode>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetEndpoint {
+    pub addr: String,
+    #[serde(default = "one_u32")]
+    pub weight: u32,
+}
+
 // 数据库行：hops 以 JSON 文本存储在 path 列。
 // owner_id 由 0004 迁移引入；0=未归属（兼容历史数据），>0=用户 id
 #[derive(Debug, FromRow)]
@@ -72,12 +79,14 @@ pub struct ForwardRow {
     pub name: String,
     pub listen_port: i64,
     pub protocol: String,
-    pub path: String, // JSON of Vec<Hop>
-    pub target: String,
+    pub path: String,   // JSON of Vec<Hop>
+    pub target: String, // JSON of Vec<TargetEndpoint>（migration 0007 之后）
     pub enabled: i64,
     pub created_at: i64,
     #[sqlx(default)]
     pub owner_id: i64,
+    #[sqlx(default)]
+    pub target_strategy: String,
 }
 
 impl ForwardRow {
@@ -95,6 +104,26 @@ impl ForwardRow {
             }
         }
     }
+
+    pub fn targets(&self) -> Vec<TargetEndpoint> {
+        let t = self.target.trim();
+        if t.starts_with('[') {
+            serde_json::from_str(t).unwrap_or_else(|e| {
+                tracing::warn!(
+                    forward_id = self.id,
+                    error = %e,
+                    raw = %self.target,
+                    "forward targets JSON 解析失败，回退空"
+                );
+                Vec::new()
+            })
+        } else if !t.is_empty() {
+            // 兜底：未跑迁移的兼容情形
+            vec![TargetEndpoint { addr: t.into(), weight: 1 }]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 // 对外 DTO
@@ -105,7 +134,8 @@ pub struct Forward {
     pub listen_port: i64,
     pub protocol: String,
     pub hops: Vec<Hop>,
-    pub target: String,
+    pub targets: Vec<TargetEndpoint>,
+    pub target_strategy: String,
     pub enabled: bool,
     pub created_at: i64,
     pub owner_id: i64,
@@ -114,13 +144,20 @@ pub struct Forward {
 impl From<ForwardRow> for Forward {
     fn from(r: ForwardRow) -> Self {
         let hops = r.hops();
+        let targets = r.targets();
+        let target_strategy = if r.target_strategy.is_empty() {
+            "weighted".into()
+        } else {
+            r.target_strategy
+        };
         Forward {
             id: r.id,
             name: r.name,
             listen_port: r.listen_port,
             protocol: r.protocol,
             hops,
-            target: r.target,
+            targets,
+            target_strategy,
             enabled: r.enabled != 0,
             created_at: r.created_at,
             owner_id: r.owner_id,
@@ -140,7 +177,14 @@ pub struct ForwardCreate {
     // 旧格式：单节点序列（向后兼容），自动升级为单节点组
     #[serde(default)]
     pub path: Option<Vec<String>>,
-    pub target: String,
+    // 旧格式：单字符串目标
+    #[serde(default)]
+    pub target: Option<String>,
+    // 新格式：多目标 + 策略
+    #[serde(default)]
+    pub targets: Option<Vec<TargetEndpoint>>,
+    #[serde(default = "default_strategy")]
+    pub target_strategy: String,
 }
 
 impl ForwardCreate {
@@ -159,10 +203,36 @@ impl ForwardCreate {
             })
             .collect()
     }
+
+    /// 归一化目标列表：新字段优先，否则把旧单字符串包成单项数组。
+    pub fn normalized_targets(&self) -> Vec<TargetEndpoint> {
+        if let Some(ts) = &self.targets {
+            return ts.clone();
+        }
+        match self.target.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(t) => vec![TargetEndpoint { addr: t.into(), weight: 1 }],
+            None => Vec::new(),
+        }
+    }
 }
 
 fn tcp() -> String {
     "tcp".into()
+}
+
+/// 归一化协议串：接受 tcp / udp / tcp+udp / both / tcp,udp / udp+tcp（大小写无关）。
+/// 返回规范形式 "tcp" / "udp" / "tcp+udp"，非法值返回 None。
+pub fn parse_protocol(raw: &str) -> Option<String> {
+    let s = raw.trim().to_ascii_lowercase();
+    let has = |k: &str| s.split(|c: char| c == '+' || c == ',' || c == '/').any(|p| p.trim() == k);
+    let tcp = has("tcp") || s == "both";
+    let udp = has("udp") || s == "both";
+    match (tcp, udp) {
+        (true, true) => Some("tcp+udp".into()),
+        (true, false) => Some("tcp".into()),
+        (false, true) => Some("udp".into()),
+        _ => None,
+    }
 }
 
 // ---- 用户 / 邀请码 / 鉴权 ----

@@ -9,12 +9,12 @@ mod web_assets;
 use anyhow::Result;
 use sqlx::SqlitePool;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::transport::{Certificate, ClientTlsConfig, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use zhuanfa_proto::control::control_server::{Control, ControlServer};
 use zhuanfa_proto::control::{
     ForwardRule, HeartbeatReply, HeartbeatRequest, Hop as PbHop, HopNode as PbHopNode, NodeAddr,
-    SyncReply, SyncRequest,
+    SyncReply, SyncRequest, TargetEndpoint as PbTargetEndpoint,
 };
 
 use models::ForwardRow;
@@ -126,13 +126,24 @@ impl Control for ControlSvc {
                             .collect(),
                     })
                     .collect();
+                let targets = r.targets();
+                let pb_targets: Vec<PbTargetEndpoint> = targets
+                    .iter()
+                    .map(|t| PbTargetEndpoint { addr: t.addr.clone(), weight: t.weight })
+                    .collect();
+                // 兼容字段：把第一个 target 也填到旧 string，便于过渡（节点优先用 targets）
+                let legacy_target = targets.first().map(|t| t.addr.clone()).unwrap_or_default();
+                let strategy = if r.target_strategy.is_empty() { "weighted".into() } else { r.target_strategy.clone() };
+                #[allow(deprecated)]
                 Some(ForwardRule {
                     id: r.id,
                     listen_port: r.listen_port as u32,
                     protocol: r.protocol,
                     hops: pb_hops,
-                    target: r.target,
+                    target: legacy_target,
                     enabled: true,
+                    targets: pb_targets,
+                    target_strategy: strategy,
                 })
             })
             .collect();
@@ -193,6 +204,17 @@ async fn main() -> Result<()> {
     // 健康探测调度器
     probe::spawn(pool.clone(), probe_interval(), fail_threshold());
 
+    // 预先准备 mTLS client config，让 master 能反向调用节点 DataPlane（用于链路测试 ProbeReach）
+    let dir = cert_dir();
+    let paths = zhuanfa_common::ensure_dev_certs(&dir)?;
+    let node_caller_tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(std::fs::read(&paths.ca)?))
+        .identity(Identity::from_pem(
+            std::fs::read(&paths.client)?,
+            std::fs::read(&paths.client_key)?,
+        ))
+        .domain_name("localhost");
+
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
     let app = api::router(api::AppState {
@@ -206,6 +228,7 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(3600), 3,
         )),
         cert_dir: cert_dir(),
+        node_caller_tls,
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
@@ -218,9 +241,7 @@ async fn main() -> Result<()> {
         .await
     });
 
-    // gRPC 控制面（mTLS）
-    let dir = cert_dir();
-    let paths = zhuanfa_common::ensure_dev_certs(&dir)?;
+    // gRPC 控制面（mTLS）— 复用前面已加载的 paths
     let identity = Identity::from_pem(
         std::fs::read(&paths.server)?,
         std::fs::read(&paths.server_key)?,
