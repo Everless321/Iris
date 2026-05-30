@@ -48,13 +48,23 @@ export default function Forwards() {
                   <span className="pill-ok">{f.protocol}</span>
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-dim">
-                  {f.hops
-                    .map((h) =>
+                  {f.hops.map((h, hi) => {
+                    const isEntry = hi === 0;
+                    const txt =
                       h.nodes.length === 1
                         ? h.nodes[0].id
-                        : `[${h.nodes.map((n) => (n.weight > 1 ? `${n.id}:${n.weight}` : n.id)).join(",")}@${h.strategy}]`
-                    )
-                    .join(" → ")}
+                        : `[${h.nodes
+                            .map((n) => (n.weight > 1 ? `${n.id}:${n.weight}` : n.id))
+                            .join(",")}${isEntry ? "" : `@${h.strategy}`}]`;
+                    return (
+                      <span key={hi}>
+                        {hi > 0 && <span className="text-mute"> → </span>}
+                        <span className={isEntry ? "text-accent" : ""}>
+                          {isEntry ? `⏵ ${txt}` : txt}
+                        </span>
+                      </span>
+                    );
+                  })}
                 </td>
                 <td className="px-4 py-3 font-mono text-dim">{f.target}</td>
                 <td className="px-4 py-3 text-right space-x-2">

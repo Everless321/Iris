@@ -1,0 +1,92 @@
+# 3 个节点容器，每个走自己的 enrollment 令牌兑换证书后启动
+services:
+  node-a:
+    image: zhuanfa:dev
+    container_name: zf-node-a
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZF_MASTER_HTTP: "http://host.docker.internal:7080"
+      ZF_MASTER_GRPC: "https://host.docker.internal:7443"
+      ZF_NODE_ID: "docker-a"
+      ZF_DATA_ADDR: "0.0.0.0:7444"
+      ZF_TOKEN: "9330611721274f05858aaf2ace552bec"
+      RUST_LOG: info
+    ports:
+      - "17444:7444"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        mkdir -p /data/certs
+        RESP=$$(curl -fsS -X POST "$$ZF_MASTER_HTTP/api/nodes/enroll" \
+          -H 'content-type: application/json' \
+          -d "{\"token\":\"$$ZF_TOKEN\"}")
+        echo "$$RESP" | jq -r .ca_pem    > /data/certs/ca.pem
+        echo "$$RESP" | jq -r .cert_pem  > /data/certs/client.pem
+        echo "$$RESP" | jq -r .key_pem   > /data/certs/client-key.pem
+        chmod 600 /data/certs/*.pem
+        echo "==> enrollment ok, starting node"
+        export ZF_MASTER="$$ZF_MASTER_GRPC"
+        exec zhuanfa-node
+
+  node-b1:
+    image: zhuanfa:dev
+    container_name: zf-node-b1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZF_MASTER_HTTP: "http://host.docker.internal:7080"
+      ZF_MASTER_GRPC: "https://host.docker.internal:7443"
+      ZF_NODE_ID: "docker-b1"
+      ZF_DATA_ADDR: "0.0.0.0:7444"
+      ZF_TOKEN: "40c499bb041b4c019b95f348dfa0d516"
+      RUST_LOG: info
+    ports:
+      - "17445:7444"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        mkdir -p /data/certs
+        RESP=$$(curl -fsS -X POST "$$ZF_MASTER_HTTP/api/nodes/enroll" \
+          -H 'content-type: application/json' \
+          -d "{\"token\":\"$$ZF_TOKEN\"}")
+        echo "$$RESP" | jq -r .ca_pem    > /data/certs/ca.pem
+        echo "$$RESP" | jq -r .cert_pem  > /data/certs/client.pem
+        echo "$$RESP" | jq -r .key_pem   > /data/certs/client-key.pem
+        chmod 600 /data/certs/*.pem
+        export ZF_MASTER="$$ZF_MASTER_GRPC"
+        exec zhuanfa-node
+
+  node-b2:
+    image: zhuanfa:dev
+    container_name: zf-node-b2
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZF_MASTER_HTTP: "http://host.docker.internal:7080"
+      ZF_MASTER_GRPC: "https://host.docker.internal:7443"
+      ZF_NODE_ID: "docker-b2"
+      ZF_DATA_ADDR: "0.0.0.0:7444"
+      ZF_TOKEN: "55f6b91b96014e4db987476b510459d9"
+      RUST_LOG: info
+    ports:
+      - "17446:7444"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        mkdir -p /data/certs
+        RESP=$$(curl -fsS -X POST "$$ZF_MASTER_HTTP/api/nodes/enroll" \
+          -H 'content-type: application/json' \
+          -d "{\"token\":\"$$ZF_TOKEN\"}")
+        echo "$$RESP" | jq -r .ca_pem    > /data/certs/ca.pem
+        echo "$$RESP" | jq -r .cert_pem  > /data/certs/client.pem
+        echo "$$RESP" | jq -r .key_pem   > /data/certs/client-key.pem
+        chmod 600 /data/certs/*.pem
+        export ZF_MASTER="$$ZF_MASTER_GRPC"
+        exec zhuanfa-node
