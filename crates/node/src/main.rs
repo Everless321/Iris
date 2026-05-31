@@ -1,6 +1,7 @@
 mod dataplane;
 mod forward;
 mod lb;
+mod quic_tunnel;
 mod raw_tunnel;
 mod sock;
 mod udp_forward;
@@ -76,8 +77,8 @@ async fn main() -> Result<()> {
     // raw_tunnel 用（rustls 原生，bypass HTTP/2 framing）
     let (raw_server_cfg, raw_client_cfg) =
         raw_tunnel::build_configs(&ca_pem, &cert_pem, &key_pem)?;
-    let raw_acceptor = tokio_rustls::TlsAcceptor::from(raw_server_cfg);
-    let raw_connector = tokio_rustls::TlsConnector::from(raw_client_cfg);
+    let raw_acceptor = tokio_rustls::TlsAcceptor::from(raw_server_cfg.clone());
+    let raw_connector = tokio_rustls::TlsConnector::from(raw_client_cfg.clone());
 
     // 连 master（重试直到就绪）
     let channel = loop {
@@ -101,10 +102,19 @@ async fn main() -> Result<()> {
         .await?
         .into_inner();
     tracing::info!(forwards = reply.forwards.len(), nodes = reply.nodes.len(), "config synced");
+    // 解析 data_addr 用于 QUIC bind（QUIC 端口 = TCP 端口 + 2）
+    let dp_addr_early: SocketAddr = data_addr.parse()?;
+    let quic_bind = SocketAddr::new(dp_addr_early.ip(), dp_addr_early.port() + 2);
+    let (quic_endpoint, quic_client_cfg) =
+        quic_tunnel::make_endpoints(quic_bind, raw_server_cfg, raw_client_cfg)?;
+    tracing::info!(%quic_bind, "quic_tunnel endpoint ready (UDP, mTLS, datagram)");
+
     let ctx = Arc::new(NodeCtx {
         nodes: RwLock::new(build_nodes(&reply.nodes)),
         tls_client,
         raw_connector: raw_connector.clone(),
+        quic_endpoint: quic_endpoint.clone(),
+        quic_client_cfg: Arc::new(quic_client_cfg),
     });
 
     // LB 由 DataPlane server 与入口共享（中转节点也需 LB 选下一跳）
@@ -132,7 +142,7 @@ async fn main() -> Result<()> {
         tracing::info!(%data_addr, "dataplane listening (mTLS, gRPC)");
     }
 
-    // raw_tunnel 数据面服务（端口 = grpc + 1，bypass HTTP/2 framing；Phase 9a）
+    // raw_tunnel 数据面服务（端口 = grpc + 1，TCP forward；Phase 9a）
     let raw_addr = SocketAddr::new(dp_addr.ip(), dp_addr.port() + 1);
     {
         let (ctx, lb, target_router) = (ctx.clone(), lb.clone(), target_router.clone());
@@ -143,6 +153,18 @@ async fn main() -> Result<()> {
                 raw_tunnel::serve(raw_addr, acceptor, connector, ctx, lb, target_router).await
             {
                 tracing::error!(error = %e, "raw_tunnel server exited");
+            }
+        });
+    }
+
+    // QUIC 数据面服务（端口 = grpc + 2，UDP forward；Phase 9c — datagram extension 避免 TCP backpressure）
+    {
+        let (ctx, lb, target_router) = (ctx.clone(), lb.clone(), target_router.clone());
+        let ep = quic_endpoint.clone();
+        let cc = ctx.quic_client_cfg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = quic_tunnel::serve(ep, cc, ctx, lb, target_router).await {
+                tracing::error!(error = %e, "quic_tunnel server exited");
             }
         });
     }

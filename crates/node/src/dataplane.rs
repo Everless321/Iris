@@ -136,8 +136,11 @@ pub struct NodeInfo {
 pub struct NodeCtx {
     pub nodes: RwLock<HashMap<String, NodeInfo>>,
     pub tls_client: ClientTlsConfig,
-    /// Phase 9a：raw_tunnel 拨号用，与 tls_client 同信任域
+    /// Phase 9a：raw_tunnel TCP 拨号用，与 tls_client 同信任域
     pub raw_connector: tokio_rustls::TlsConnector,
+    /// Phase 9c：QUIC endpoint（同 endpoint 兼 server + client，避免双开 UDP port）
+    pub quic_endpoint: quinn::Endpoint,
+    pub quic_client_cfg: Arc<quinn::ClientConfig>,
 }
 
 impl NodeCtx {
