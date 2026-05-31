@@ -7,11 +7,11 @@ cd "$(dirname "$0")/.."
 echo "==> 编译"; cargo build -q
 
 echo "==> 启动 master（探测 2s）"
-rm -f data/zhuanfa.db*
-ZF_PROBE_INTERVAL=2 ZF_FAIL_THRESHOLD=2 ./target/debug/zhuanfa-master > /tmp/zf-m.log 2>&1 &
+rm -f data/iris.db*
+IRIS_PROBE_INTERVAL=2 IRIS_FAIL_THRESHOLD=2 ./target/debug/iris-master > /tmp/zf-m.log 2>&1 &
 MPID=$!; sleep 2
 
-CLI=./target/debug/zhuanfa-cli
+CLI=./target/debug/iris-cli
 $CLI add-node --id a  --name entry --addr 127.0.0.1:7444 >/dev/null
 $CLI add-node --id m1 --name mid1  --addr 127.0.0.1:7445 >/dev/null
 $CLI add-node --id m2 --name mid2  --addr 127.0.0.1:7446 >/dev/null
@@ -20,10 +20,10 @@ $CLI add-node --id c  --name exit  --addr 127.0.0.1:7447 >/dev/null
 $CLI add-forward --name midha --listen 10080 --hops "a | m1,m2@weighted | c" --target 127.0.0.1:7080 >/dev/null
 
 echo "==> 启动 a/m1/m2/c"
-ZF_NODE_ID=m1 ZF_DATA_ADDR=0.0.0.0:7445 ./target/debug/zhuanfa-node > /tmp/zf-m1.log 2>&1 & M1=$!
-ZF_NODE_ID=m2 ZF_DATA_ADDR=0.0.0.0:7446 ./target/debug/zhuanfa-node > /tmp/zf-m2.log 2>&1 & M2=$!
-ZF_NODE_ID=c  ZF_DATA_ADDR=0.0.0.0:7447 ./target/debug/zhuanfa-node > /tmp/zf-c.log 2>&1 & C=$!
-ZF_NODE_ID=a  ZF_DATA_ADDR=0.0.0.0:7444 ./target/debug/zhuanfa-node > /tmp/zf-a.log 2>&1 & A=$!
+IRIS_NODE_ID=m1 IRIS_DATA_ADDR=0.0.0.0:7445 ./target/debug/iris-node > /tmp/zf-m1.log 2>&1 & M1=$!
+IRIS_NODE_ID=m2 IRIS_DATA_ADDR=0.0.0.0:7446 ./target/debug/iris-node > /tmp/zf-m2.log 2>&1 & M2=$!
+IRIS_NODE_ID=c  IRIS_DATA_ADDR=0.0.0.0:7447 ./target/debug/iris-node > /tmp/zf-c.log 2>&1 & C=$!
+IRIS_NODE_ID=a  IRIS_DATA_ADDR=0.0.0.0:7444 ./target/debug/iris-node > /tmp/zf-a.log 2>&1 & A=$!
 sleep 5
 
 echo "==> [正常] 4 连接经中转组分流"
@@ -45,5 +45,5 @@ curl -s localhost:7080/api/sla | python3 -c "import sys,json; d=json.load(sys.st
 
 echo "==> 清理"
 kill $A $M2 $C $MPID 2>/dev/null || true
-pkill -f zhuanfa-node 2>/dev/null || true
+pkill -f iris-node 2>/dev/null || true
 [ "$OK" = "8" ] && echo "✅ 中转故障转移通过（m1 挂后流量经 m2 到达 c）" || echo "⚠️ 查看 /tmp/zf-*.log"

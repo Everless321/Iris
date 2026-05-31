@@ -55,7 +55,7 @@ export default function Login() {
           >
             z
           </div>
-          <span style={{ fontSize: 16, fontWeight: 600 }}>Zhuanfa</span>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>Iris</span>
         </Space>
 
         <div style={{ maxWidth: 480 }}>
@@ -79,7 +79,7 @@ export default function Login() {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <Card style={{ width: 380, border: "none", boxShadow: "none" }}>
           <Title level={3} style={{ marginBottom: 4 }}>欢迎回来</Title>
-          <Text type="secondary">登录到 Zhuanfa 控制面</Text>
+          <Text type="secondary">登录到 Iris 控制面</Text>
 
           <Form layout="vertical" onFinish={onFinish} style={{ marginTop: 28 }} requiredMark={false}>
             <Form.Item

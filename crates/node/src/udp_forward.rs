@@ -11,7 +11,7 @@ use crate::dataplane::{NodeCtx, TargetRouter, UDP_BUF};
 use crate::lb::LoadBalancer;
 use crate::quic_tunnel;
 use crate::sock;
-use zhuanfa_proto::control::{Hop, TargetEndpoint};
+use iris_proto::control::{Hop, TargetEndpoint};
 
 const SESSION_IDLE_MS: i64 = 60_000;
 const GC_INTERVAL: Duration = Duration::from_secs(10);

@@ -1,15 +1,15 @@
 [package]
-name = "zhuanfa-node"
+name = "iris-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "zhuanfa-node"
+name = "iris-node"
 path = "src/main.rs"
 
 [dependencies]
-zhuanfa-proto = { path = "../proto" }
+iris-proto = { path = "../proto" }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true

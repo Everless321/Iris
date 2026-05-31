@@ -1,11 +1,11 @@
 [package]
-name = "zhuanfa-cli"
+name = "iris-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "zhuanfa-cli"
+name = "iris-cli"
 path = "src/main.rs"
 
 [dependencies]

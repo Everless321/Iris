@@ -16,7 +16,7 @@
 | 文件 | 内容 |
 |------|------|
 | `crates/common/src/lib.rs` | `ensure_dev_certs` 重写：CA / server pair / shared client pair 分段补齐；server cert 版本标记 `v2-mtls-sni` → 自动迁移到新 SAN |
-| `crates/node/src/main.rs:73` | 连 master SNI 由 `localhost` 改 `zhuanfa-master` |
+| `crates/node/src/main.rs:73` | 连 master SNI 由 `localhost` 改 `iris-master` |
 | `crates/node/src/dataplane.rs` | `connect_dataplane(ctx, peer_node_id, addr)` 加参数；`try_open` / `connect_next` 透传 |
 | `crates/node/src/raw_tunnel.rs` | `try_open(peer_node_id, ...)` 加参数；`ServerName::try_from(peer_node_id)` |
 | `crates/node/src/quic_tunnel.rs` | `dial(...,"localhost")` → `dial(..., node_id)` |
@@ -26,13 +26,13 @@
 
 改动前任何持有 CA 签发证书的节点都能冒充任意其他节点：dial 端 SNI=`localhost`，所有节点 cert SAN 都含 `localhost`，rustls 校验始终通过。攻击者拿到 nodeA 的 cert 可以 dial nodeB 的下游并被信任。
 
-改动后 dial 端 SNI=对方稳定身份名（node_id 或 `zhuanfa-master`），rustls 强制校验对端 cert SAN 含此身份，证书与身份绑定。
+改动后 dial 端 SNI=对方稳定身份名（node_id 或 `iris-master`），rustls 强制校验对端 cert SAN 含此身份，证书与身份绑定。
 
 ### 1.3 滚动升级关键点
 
 - **CA 不动**：原 `ca.pem` / `ca-key.pem` 保留，已签发的 node cert 仍有效
 - **node cert 不重签**：现有 `sign_node_cert` 早就把 `node_id` 写进 SAN（line 119 of `crates/common/src/lib.rs`）
-- **master server cert 自动迁移**：检测 `.server-cert-version` 不存在或值不是 `v2-mtls-sni` → 删 `server.pem`+`server-key.pem` 重签（SAN 加 `zhuanfa-master`），写入版本标记
+- **master server cert 自动迁移**：检测 `.server-cert-version` 不存在或值不是 `v2-mtls-sni` → 删 `server.pem`+`server-key.pem` 重签（SAN 加 `iris-master`），写入版本标记
 - **SAN 兼容保留**：server.pem 的 SAN 仍含 `localhost`+`127.0.0.1`，旧 node 用 SNI=`localhost` 仍能连进来
 - **部署顺序**：master 先（触发自动迁移），node 后
 
@@ -43,7 +43,7 @@
 ### 2.1 本地构建
 
 ```bash
-cd /Users/everless/project/zhuanfa  # 或 codex 的 workspace
+cd /Users/everless/project/iris  # 或 codex 的 workspace
 cargo build --workspace --release
 ```
 
@@ -52,29 +52,29 @@ cargo build --workspace --release
 ### 2.2 CI artifact
 
 push commit `4669c99` 已触发 GitHub Actions `musl-build`：
-- 仓库：https://github.com/Everless321/zhuanfa/actions
+- 仓库：https://github.com/Everless321/iris/actions
 - workflow：`musl-build.yml`
-- 产物：`zhuanfa-musl-x86_64` artifact，含 `zhuanfa-master` + `zhuanfa-node`（musl 静态 PIE）
+- 产物：`iris-musl-x86_64` artifact，含 `iris-master` + `iris-node`（musl 静态 PIE）
 
 下载方式（任选）：
 ```bash
 # GitHub CLI
-gh run download --repo Everless321/zhuanfa --name zhuanfa-musl-x86_64 --dir artifact/
+gh run download --repo Everless321/iris --name iris-musl-x86_64 --dir artifact/
 
 # 或浏览器从 Actions 页面下载
 ```
 
 ### 2.3 部署目标
 
-`scripts/deploy-prod.sh artifact/` 会按 `~/.zhuanfa/hosts.conf`（4 字段 `name:ip:port:roles`）滚动推送：
+`scripts/deploy-prod.sh artifact/` 会按 `~/.iris/hosts.conf`（4 字段 `name:ip:port:roles`）滚动推送：
 1. 推 node binary 到所有节点（含 master_node）
 2. 推 master binary 到 master_node
 3. restart master + curl healthz
 4. restart 所有 node + md5 校验跑的是新 binary
 
 凭证：
-- SSH key：`~/.zhuanfa/keys/zfdeploy`（ed25519）
-- known_hosts：`~/.zhuanfa/known_hosts`（accept-new pinning）
+- SSH key：`~/.iris/keys/zfdeploy`（ed25519）
+- known_hosts：`~/.iris/known_hosts`（accept-new pinning）
 
 ---
 
@@ -89,7 +89,7 @@ cargo test --workspace 2>&1 | tail -20
 ```
 
 **期望**：
-- `zhuanfa_node` lb tests: **11 passed**（`unhealthy_skipped` / `latency_lowest_first` / `least_conn_orders_by_load` / `source_hash_stable_on_topology_change` / `single_node` / `weighted_has_failover_fallback` / `all_unhealthy_degrades` / `conn_guard_decrements` / `huge_weight_capped` / `source_hash_sticky` / `weighted_primary_respects_weights`）
+- `iris_node` lb tests: **11 passed**（`unhealthy_skipped` / `latency_lowest_first` / `least_conn_orders_by_load` / `source_hash_stable_on_topology_change` / `single_node` / `weighted_has_failover_fallback` / `all_unhealthy_degrades` / `conn_guard_decrements` / `huge_weight_capped` / `source_hash_sticky` / `weighted_primary_respects_weights`）
 - 其他 crate `0 passed; 0 failed`（暂无单元测试）
 - 退出码 0
 
@@ -107,7 +107,7 @@ rm -rf certs/
 ls certs/ 2>/dev/null || echo "missing"
 
 # 启动 master 4 秒后 kill
-cargo run -p zhuanfa-master --quiet &
+cargo run -p iris-master --quiet &
 PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 # 验
@@ -122,21 +122,21 @@ cat certs/.server-cert-version
 - 公钥（`*.pem`）权限 644
 - `.server-cert-version` 内容 = `v2-mtls-sni`（无换行）
 
-#### B2. server cert SAN 含 `zhuanfa-master` [P0]
+#### B2. server cert SAN 含 `iris-master` [P0]
 
 ```bash
 openssl x509 -in certs/server.pem -text -noout | grep -A 2 "Subject Alternative"
 ```
 
-**期望**：`DNS:localhost, IP Address:127.0.0.1, DNS:zhuanfa-master`（三项全有，顺序不重要）
+**期望**：`DNS:localhost, IP Address:127.0.0.1, DNS:iris-master`（三项全有，顺序不重要）
 
-#### B3. 共享 client cert SAN 不含 zhuanfa-master [P1]
+#### B3. 共享 client cert SAN 不含 iris-master [P1]
 
 ```bash
 openssl x509 -in certs/client.pem -text -noout | grep -A 2 "Subject Alternative"
 ```
 
-**期望**：仅 `DNS:localhost, IP Address:127.0.0.1`（共享 client 是 master 反向 probe 用的，每个 dial per-call 设 SNI=目标 node_id；不需要 zhuanfa-master）
+**期望**：仅 `DNS:localhost, IP Address:127.0.0.1`（共享 client 是 master 反向 probe 用的，每个 dial per-call 设 SNI=目标 node_id；不需要 iris-master）
 
 #### B4. 旧部署自动迁移 [P0]
 
@@ -149,7 +149,7 @@ openssl x509 -in certs/server.pem -text -noout | grep -A 2 "Subject Alternative"
 # rm certs/server.pem certs/server-key.pem
 
 # 跑 master 触发迁移
-cargo run -p zhuanfa-master --quiet &
+cargo run -p iris-master --quiet &
 PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 # 验
@@ -158,7 +158,7 @@ cat certs/.server-cert-version
 ```
 
 **期望**：
-- server.pem SAN 多了 `DNS:zhuanfa-master`
+- server.pem SAN 多了 `DNS:iris-master`
 - `.server-cert-version` 写入 `v2-mtls-sni`
 - **`ca.pem` MD5 不变**（CA 私钥保留 → 已签发 node cert 仍有效）
 - **`client.pem` 不变**（共享 client cert 不在迁移范围）
@@ -176,7 +176,7 @@ md5sum certs/ca.pem  # 跟迁移前对比
 cat > /tmp/test_sign.rs <<'EOF'
 fn main() {
     let (cert_pem, _key_pem, _ca_pem) =
-        zhuanfa_common::sign_node_cert("./certs", "test-node-99").unwrap();
+        iris_common::sign_node_cert("./certs", "test-node-99").unwrap();
     std::fs::write("/tmp/test_node_cert.pem", &cert_pem).unwrap();
     println!("OK");
 }
@@ -186,8 +186,8 @@ EOF
 
 替代验证（推荐）：用现有 deploy 后的 prod 节点 cert 解析：
 ```bash
-ssh -i ~/.zhuanfa/keys/zfdeploy root@<node-ip> \
-  "openssl x509 -in /opt/zhuanfa/certs/client.pem -text -noout | grep -A 2 'Subject Alternative'"
+ssh -i ~/.iris/keys/zfdeploy root@<node-ip> \
+  "openssl x509 -in /opt/iris/certs/client.pem -text -noout | grep -A 2 'Subject Alternative'"
 ```
 
 **期望**：SAN 含 `DNS:localhost, DNS:<node_id>`（例如 `DNS:nosla-att`, `DNS:ctc-rfchost` 等）
@@ -200,7 +200,7 @@ ssh -i ~/.zhuanfa/keys/zfdeploy root@<node-ip> \
 
 ```bash
 # 部署 master，启动后看日志
-ssh ... "journalctl -u zhuanfa-master --since '30 sec ago' --no-pager" | head -30
+ssh ... "journalctl -u iris-master --since '30 sec ago' --no-pager" | head -30
 ```
 
 **期望**：
@@ -211,7 +211,7 @@ ssh ... "journalctl -u zhuanfa-master --since '30 sec ago' --no-pager" | head -3
 #### C2. node 启动连 master 成功 [P0]
 
 ```bash
-ssh ... "journalctl -u zhuanfa-node --since '30 sec ago' --no-pager" | head -30
+ssh ... "journalctl -u iris-node --since '30 sec ago' --no-pager" | head -30
 ```
 
 **期望**：
@@ -224,7 +224,7 @@ ssh ... "journalctl -u zhuanfa-node --since '30 sec ago' --no-pager" | head -30
 #### C3. 心跳 / SyncConfig 持续 [P0]
 
 ```bash
-ssh ... "journalctl -u zhuanfa-master -f --no-pager" | head -20
+ssh ... "journalctl -u iris-master -f --no-pager" | head -20
 # 等 15s 观察 heartbeat
 ```
 
@@ -257,9 +257,9 @@ echo "test-tcp-single" | nc <entry-public-ip> <listen-port>
 echo "test-tcp-multi" | nc <A-public-ip> <listen-port>
 
 # 看每跳日志：
-ssh A "journalctl -u zhuanfa-node --since '10 sec ago' | grep 'raw next-hop'"
-ssh B "journalctl -u zhuanfa-node --since '10 sec ago' | grep 'raw exit\|raw next-hop'"
-ssh C "journalctl -u zhuanfa-node --since '10 sec ago' | grep 'raw exit'"
+ssh A "journalctl -u iris-node --since '10 sec ago' | grep 'raw next-hop'"
+ssh B "journalctl -u iris-node --since '10 sec ago' | grep 'raw exit\|raw next-hop'"
+ssh C "journalctl -u iris-node --since '10 sec ago' | grep 'raw exit'"
 ```
 
 **期望**：
@@ -284,7 +284,7 @@ done | wc -l
 
 ```bash
 # 看 quic 日志
-ssh A "journalctl -u zhuanfa-node --since '10 sec ago' | grep 'quic next-hop\|quic exit'"
+ssh A "journalctl -u iris-node --since '10 sec ago' | grep 'quic next-hop\|quic exit'"
 ```
 
 **期望**：每个节点都有对应日志，无 `quic accept` / `quic conn ended` error
@@ -323,9 +323,9 @@ iperf3 -c <A-public-ip> -p <udp-listen-port> -u -b 100M -t 30
 
 ```bash
 # 从某 node 拷一份 cert / key / ca 到本地
-ssh <node-A> "cat /opt/zhuanfa/certs/client.pem" > /tmp/A-cert.pem
-ssh <node-A> "cat /opt/zhuanfa/certs/client-key.pem" > /tmp/A-key.pem
-ssh <node-A> "cat /opt/zhuanfa/certs/ca.pem" > /tmp/ca.pem
+ssh <node-A> "cat /opt/iris/certs/client.pem" > /tmp/A-cert.pem
+ssh <node-A> "cat /opt/iris/certs/client-key.pem" > /tmp/A-key.pem
+ssh <node-A> "cat /opt/iris/certs/ca.pem" > /tmp/ca.pem
 
 # 用 openssl s_client 强制 SNI=nodeB，连 nodeB 的 dataplane 端口 7444
 openssl s_client -connect <node-B-ip>:7444 \
@@ -384,10 +384,10 @@ QUIC 用 `openssl s_client` 不直接支持，可以：
 #### E6. 节点冒充实战：起一个假节点 [P1]
 
 ```bash
-# 在一台无关机器上用 node A 的 cert 启动一个 zhuanfa-node 进程
-# 让它假装是 node B（设置 ZF_NODE_ID=node-B）
+# 在一台无关机器上用 node A 的 cert 启动一个 iris-node 进程
+# 让它假装是 node B（设置 IRIS_NODE_ID=node-B）
 # 期望：连 master 失败（master server cert SAN 不含 "node-B"，
-#       不，等等——node→master SNI 是 "zhuanfa-master"，与 ZF_NODE_ID 无关）
+#       不，等等——node→master SNI 是 "iris-master"，与 IRIS_NODE_ID 无关）
 # 这条测试**不适用**（攻击面在 node→node，不在 node→master）
 
 # 真实有效的攻击场景：node A 的 cert + 路由表知识 → dial node B 的下游
@@ -404,10 +404,10 @@ QUIC 用 `openssl s_client` 不直接支持，可以：
 #### F1. 部署顺序：master → node [P0]
 
 ```bash
-# 假设当前是 v1 部署（旧 server cert 无 zhuanfa-master SAN）
+# 假设当前是 v1 部署（旧 server cert 无 iris-master SAN）
 # 1. 先推 master + restart
 # 2. 立刻验证旧 node 仍能连
-ssh <node-X-still-old> "journalctl -u zhuanfa-node --since '30 sec ago' | grep -E 'heartbeat|connected|tls handshake'"
+ssh <node-X-still-old> "journalctl -u iris-node --since '30 sec ago' | grep -E 'heartbeat|connected|tls handshake'"
 ```
 
 **期望**：旧 node（SNI=localhost）连到新 master 仍成功 — 因为 server.pem v2 SAN 含 `localhost`。
@@ -553,12 +553,12 @@ curl -X POST http://<master-ip>:7080/api/nodes/enroll \
 ## 7. 联系人 / 资源
 
 - Owner: everless@everless.dev
-- Repo: https://github.com/Everless321/zhuanfa
+- Repo: https://github.com/Everless321/iris
 - Commit: `4669c99`
 - Changelog: `docs/changelog/20260531-114034-mtls-per-node-sni.md`
-- CI: https://github.com/Everless321/zhuanfa/actions
+- CI: https://github.com/Everless321/iris/actions
 - Deploy 脚本: `scripts/deploy-prod.sh`
-- 主机清单: `~/.zhuanfa/hosts.conf`（4 字段 name:ip:port:roles）
+- 主机清单: `~/.iris/hosts.conf`（4 字段 name:ip:port:roles）
 
 ---
 

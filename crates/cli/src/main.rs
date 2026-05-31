@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 #[derive(Parser)]
-#[command(name = "zhuanfa-cli", about = "Zhuanfa 转发平台命令行")]
+#[command(name = "iris-cli", about = "Iris 转发平台命令行")]
 struct Cli {
     /// master HTTP API 地址
     #[arg(long, default_value = "http://127.0.0.1:7080", global = true)]

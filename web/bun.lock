@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "zhuanfa-web",
+      "name": "iris-web",
       "dependencies": {
         "@ant-design/icons": "^6.2.5",
         "@xyflow/react": "^12.3.5",

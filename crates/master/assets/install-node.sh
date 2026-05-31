@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Zhuanfa 节点一键安装脚本。
+# Iris 节点一键安装脚本。
 #   curl -fsSL <MASTER>/install.sh | bash -s -- \
 #     --master https://<MASTER_HTTP> \
 #     --token <ENROLLMENT_TOKEN> \
-#     [--binary /path/to/zhuanfa-node] \
-#     [--install-dir /opt/zhuanfa] \
+#     [--binary /path/to/iris-node] \
+#     [--install-dir /opt/iris] \
 #     [--data-addr 0.0.0.0:7444]
 set -euo pipefail
 
 MASTER=""
 TOKEN=""
 BINARY=""
-INSTALL_DIR="/opt/zhuanfa"
+INSTALL_DIR="/opt/iris"
 DATA_ADDR=""
 
 while [ $# -gt 0 ]; do
@@ -70,39 +70,39 @@ done
 
 # 二进制：如果没显式提供，期望已在 PATH 或 INSTALL_DIR
 if [ -n "$BINARY" ]; then
-  echo "==> 复制二进制 $BINARY → $INSTALL_DIR/zhuanfa-node"
-  cp "$BINARY" "$INSTALL_DIR/zhuanfa-node"
-  chmod +x "$INSTALL_DIR/zhuanfa-node"
-elif [ -x "$INSTALL_DIR/zhuanfa-node" ]; then
-  echo "==> 检测到已存在 $INSTALL_DIR/zhuanfa-node"
+  echo "==> 复制二进制 $BINARY → $INSTALL_DIR/iris-node"
+  cp "$BINARY" "$INSTALL_DIR/iris-node"
+  chmod +x "$INSTALL_DIR/iris-node"
+elif [ -x "$INSTALL_DIR/iris-node" ]; then
+  echo "==> 检测到已存在 $INSTALL_DIR/iris-node"
 else
-  echo "⚠️  未提供 --binary，且 $INSTALL_DIR/zhuanfa-node 不存在"
-  echo "    请先把 zhuanfa-node 二进制放到 $INSTALL_DIR/，或重跑时加 --binary <路径>"
+  echo "⚠️  未提供 --binary，且 $INSTALL_DIR/iris-node 不存在"
+  echo "    请先把 iris-node 二进制放到 $INSTALL_DIR/，或重跑时加 --binary <路径>"
   exit 1
 fi
 
 # 写一个简单的 env 文件
 cat > "$INSTALL_DIR/.env" <<EOF
-ZF_NODE_ID=$NODE_ID
-ZF_DATA_ADDR=$DATA_ADDR
-ZF_CERT_DIR=$CERT_DIR
-ZF_MASTER=$MASTER_GRPC
+IRIS_NODE_ID=$NODE_ID
+IRIS_DATA_ADDR=$DATA_ADDR
+IRIS_CERT_DIR=$CERT_DIR
+IRIS_MASTER=$MASTER_GRPC
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
 # 检测 systemd 写 unit；否则给出手动启动命令
 if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
-  echo "==> 安装 systemd 服务 zhuanfa-node.service"
-  cat > /etc/systemd/system/zhuanfa-node.service <<UNIT
+  echo "==> 安装 systemd 服务 iris-node.service"
+  cat > /etc/systemd/system/iris-node.service <<UNIT
 [Unit]
-Description=Zhuanfa Node ($NODE_ID)
+Description=Iris Node ($NODE_ID)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=$INSTALL_DIR/zhuanfa-node
+ExecStart=$INSTALL_DIR/iris-node
 Restart=always
 RestartSec=3
 WorkingDirectory=$INSTALL_DIR
@@ -111,9 +111,9 @@ WorkingDirectory=$INSTALL_DIR
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now zhuanfa-node
-  echo "✅ 已启动。journalctl -u zhuanfa-node -f 看日志"
+  systemctl enable --now iris-node
+  echo "✅ 已启动。journalctl -u iris-node -f 看日志"
 else
   echo "==> 无 systemd，手动启动："
-  echo "    cd $INSTALL_DIR && env \$(cat .env | xargs) ./zhuanfa-node"
+  echo "    cd $INSTALL_DIR && env \$(cat .env | xargs) ./iris-node"
 fi

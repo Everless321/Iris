@@ -12,7 +12,7 @@ API_HTTP=http://127.0.0.1:7080
 API=$API_HTTP/api
 
 cleanup() {
-    pkill -f 'target/debug/zhuanfa-(master|node)' 2>/dev/null || true
+    pkill -f 'target/debug/iris-(master|node)' 2>/dev/null || true
     sleep 0.5
     rm -rf /tmp/zf-udp-certs-*
 }
@@ -22,9 +22,9 @@ echo "==> [1/7] 编译（debug）"
 cargo build -q 2>&1 | tail -3
 
 echo "==> [2/7] 启动 master"
-rm -f data/zhuanfa.db*
-ZF_ADMIN_USER=$ADMIN_USER ZF_ADMIN_PASS=$ADMIN_PASS RUST_LOG=info \
-    ./target/debug/zhuanfa-master > $LOG/master.log 2>&1 &
+rm -f data/iris.db*
+IRIS_ADMIN_USER=$ADMIN_USER IRIS_ADMIN_PASS=$ADMIN_PASS RUST_LOG=info \
+    ./target/debug/iris-master > $LOG/master.log 2>&1 &
 for i in $(seq 1 20); do
     sleep 0.5
     curl -fsS $API_HTTP/healthz >/dev/null 2>&1 && break
@@ -72,15 +72,15 @@ curl -fsS -X POST $API/forwards -H 'content-type: application/json' -H "$AUTH" \
     -d '{"name":"dual","listen_port":10353,"protocol":"tcp+udp","path":["a"],"target":"1.1.1.1:53"}' >/dev/null
 
 echo "==> [6/7] 启动 node a/b/c"
-ZF_NODE_ID=a ZF_DATA_ADDR=0.0.0.0:$PORT_A ZF_CERT_DIR=/tmp/zf-udp-certs-a \
-    ZF_MASTER=https://127.0.0.1:7443 RUST_LOG=info \
-    ./target/debug/zhuanfa-node > $LOG/node-a.log 2>&1 &
-ZF_NODE_ID=b ZF_DATA_ADDR=0.0.0.0:$PORT_B ZF_CERT_DIR=/tmp/zf-udp-certs-b \
-    ZF_MASTER=https://127.0.0.1:7443 RUST_LOG=info \
-    ./target/debug/zhuanfa-node > $LOG/node-b.log 2>&1 &
-ZF_NODE_ID=c ZF_DATA_ADDR=0.0.0.0:$PORT_C ZF_CERT_DIR=/tmp/zf-udp-certs-c \
-    ZF_MASTER=https://127.0.0.1:7443 RUST_LOG=info \
-    ./target/debug/zhuanfa-node > $LOG/node-c.log 2>&1 &
+IRIS_NODE_ID=a IRIS_DATA_ADDR=0.0.0.0:$PORT_A IRIS_CERT_DIR=/tmp/zf-udp-certs-a \
+    IRIS_MASTER=https://127.0.0.1:7443 RUST_LOG=info \
+    ./target/debug/iris-node > $LOG/node-a.log 2>&1 &
+IRIS_NODE_ID=b IRIS_DATA_ADDR=0.0.0.0:$PORT_B IRIS_CERT_DIR=/tmp/zf-udp-certs-b \
+    IRIS_MASTER=https://127.0.0.1:7443 RUST_LOG=info \
+    ./target/debug/iris-node > $LOG/node-b.log 2>&1 &
+IRIS_NODE_ID=c IRIS_DATA_ADDR=0.0.0.0:$PORT_C IRIS_CERT_DIR=/tmp/zf-udp-certs-c \
+    IRIS_MASTER=https://127.0.0.1:7443 RUST_LOG=info \
+    ./target/debug/iris-node > $LOG/node-c.log 2>&1 &
 sleep 4
 
 echo "==> [7/7] 验证"

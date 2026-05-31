@@ -1056,6 +1056,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "iris-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rcgen",
+]
+
+[[package]]
+name = "iris-master"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "iris-common",
+ "iris-proto",
+ "jsonwebtoken",
+ "mime_guess",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tonic",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "iris-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "iris-proto",
+ "prost",
+ "quinn",
+ "rustls",
+ "rustls-pemfile",
+ "socket2 0.5.10",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "iris-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "protoc-bin-vendored",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3509,77 +3580,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "zhuanfa-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "zhuanfa-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rcgen",
-]
-
-[[package]]
-name = "zhuanfa-master"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "axum",
- "jsonwebtoken",
- "mime_guess",
- "rust-embed",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tonic",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zhuanfa-common",
- "zhuanfa-proto",
-]
-
-[[package]]
-name = "zhuanfa-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "prost",
- "quinn",
- "rustls",
- "rustls-pemfile",
- "socket2 0.5.10",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "zhuanfa-proto",
-]
-
-[[package]]
-name = "zhuanfa-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "protoc-bin-vendored",
- "tonic",
- "tonic-build",
 ]
 
 [[package]]

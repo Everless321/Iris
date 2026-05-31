@@ -8,21 +8,21 @@ echo "==> 编译"
 cargo build -q
 
 echo "==> 启动 master（探测间隔 2s，连续 2 次失败切流）"
-rm -f data/zhuanfa.db*
-ZF_PROBE_INTERVAL=2 ZF_FAIL_THRESHOLD=2 ./target/debug/zhuanfa-master > /tmp/zf-m.log 2>&1 &
+rm -f data/iris.db*
+IRIS_PROBE_INTERVAL=2 IRIS_FAIL_THRESHOLD=2 ./target/debug/iris-master > /tmp/zf-m.log 2>&1 &
 MPID=$!
 sleep 2
 
-CLI=./target/debug/zhuanfa-cli
+CLI=./target/debug/iris-cli
 $CLI add-node --id a  --name entry --addr 127.0.0.1:7444 >/dev/null
 $CLI add-node --id b1 --name exit1 --addr 127.0.0.1:7445 >/dev/null
 $CLI add-node --id b2 --name exit2 --addr 127.0.0.1:7446 >/dev/null
 $CLI add-forward --name ha --listen 10080 --hops "a | b1,b2@weighted" --target 127.0.0.1:7080 >/dev/null
 
 echo "==> 启动 a/b1/b2"
-ZF_NODE_ID=b1 ZF_DATA_ADDR=0.0.0.0:7445 ./target/debug/zhuanfa-node > /tmp/zf-b1.log 2>&1 & B1=$!
-ZF_NODE_ID=b2 ZF_DATA_ADDR=0.0.0.0:7446 ./target/debug/zhuanfa-node > /tmp/zf-b2.log 2>&1 & B2=$!
-ZF_NODE_ID=a  ZF_DATA_ADDR=0.0.0.0:7444 ./target/debug/zhuanfa-node > /tmp/zf-a.log 2>&1 & A=$!
+IRIS_NODE_ID=b1 IRIS_DATA_ADDR=0.0.0.0:7445 ./target/debug/iris-node > /tmp/zf-b1.log 2>&1 & B1=$!
+IRIS_NODE_ID=b2 IRIS_DATA_ADDR=0.0.0.0:7446 ./target/debug/iris-node > /tmp/zf-b2.log 2>&1 & B2=$!
+IRIS_NODE_ID=a  IRIS_DATA_ADDR=0.0.0.0:7444 ./target/debug/iris-node > /tmp/zf-a.log 2>&1 & A=$!
 sleep 5
 
 echo "==> [正常] 8 连接，应分流 b1/b2"
@@ -49,5 +49,5 @@ curl -s localhost:7080/metrics | grep -E "node_up|nodes_online|nodes_total"
 
 echo "==> 清理"
 kill $A $B2 $MPID 2>/dev/null || true
-pkill -f zhuanfa-node 2>/dev/null || true
+pkill -f iris-node 2>/dev/null || true
 [ "$OK" = "8" ] && echo "✅ P3 故障转移演示通过（b1 故障后流量 100% 切到 b2）" || echo "⚠️ 查看 /tmp/zf-*.log"

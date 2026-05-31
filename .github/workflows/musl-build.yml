@@ -52,22 +52,22 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
           cargo build --release --target x86_64-unknown-linux-musl \
-            --bin zhuanfa-master --bin zhuanfa-node
+            --bin iris-master --bin iris-node
 
       - name: Verify static linkage
         run: |
-          strip target/x86_64-unknown-linux-musl/release/zhuanfa-master
-          strip target/x86_64-unknown-linux-musl/release/zhuanfa-node
-          ls -lh target/x86_64-unknown-linux-musl/release/zhuanfa-{master,node}
-          file target/x86_64-unknown-linux-musl/release/zhuanfa-master
-          file target/x86_64-unknown-linux-musl/release/zhuanfa-node
+          strip target/x86_64-unknown-linux-musl/release/iris-master
+          strip target/x86_64-unknown-linux-musl/release/iris-node
+          ls -lh target/x86_64-unknown-linux-musl/release/iris-{master,node}
+          file target/x86_64-unknown-linux-musl/release/iris-master
+          file target/x86_64-unknown-linux-musl/release/iris-node
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zhuanfa-musl-x86_64
+          name: iris-musl-x86_64
           path: |
-            target/x86_64-unknown-linux-musl/release/zhuanfa-master
-            target/x86_64-unknown-linux-musl/release/zhuanfa-node
+            target/x86_64-unknown-linux-musl/release/iris-master
+            target/x86_64-unknown-linux-musl/release/iris-node
           retention-days: 14
           if-no-files-found: error

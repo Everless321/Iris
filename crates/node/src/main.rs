@@ -17,9 +17,9 @@ use std::time::Duration;
 use tonic::transport::{
     Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig,
 };
-use zhuanfa_proto::control::control_client::ControlClient;
-use zhuanfa_proto::control::data_plane_server::DataPlaneServer;
-use zhuanfa_proto::control::{HeartbeatRequest, NodeAddr, SyncRequest};
+use iris_proto::control::control_client::ControlClient;
+use iris_proto::control::data_plane_server::DataPlaneServer;
+use iris_proto::control::{HeartbeatRequest, NodeAddr, SyncRequest};
 
 fn build_nodes(ns: &[NodeAddr]) -> HashMap<String, NodeInfo> {
     ns.iter()
@@ -50,10 +50,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let master = env("ZF_MASTER", "https://127.0.0.1:7443");
-    let cert_dir = env("ZF_CERT_DIR", "certs");
-    let node_id = env("ZF_NODE_ID", "node-dev-1");
-    let data_addr = env("ZF_DATA_ADDR", "0.0.0.0:7444");
+    let master = env("IRIS_MASTER", "https://127.0.0.1:7443");
+    let cert_dir = env("IRIS_CERT_DIR", "certs");
+    let node_id = env("IRIS_NODE_ID", "node-dev-1");
+    let data_addr = env("IRIS_DATA_ADDR", "0.0.0.0:7444");
 
     // 等待证书就绪（容器编排下启动顺序不保证）
     let p = |f: &str| format!("{cert_dir}/{f}");
@@ -67,12 +67,12 @@ async fn main() -> Result<()> {
     // tonic 用（保持 gRPC 数据面 + 控制面兼容）
     let ca = Certificate::from_pem(&ca_pem);
     let identity = Identity::from_pem(&cert_pem, &key_pem);
-    // SNI 用 master 稳定身份名（master server.pem SAN v2 含 zhuanfa-master + localhost 兼容）。
+    // SNI 用 master 稳定身份名（master server.pem SAN v2 含 iris-master + localhost 兼容）。
     // node → node gRPC 的 SNI 在 dataplane::connect_dataplane per-call override 为对方 node_id。
     let tls_client = ClientTlsConfig::new()
         .ca_certificate(ca.clone())
         .identity(identity.clone())
-        .domain_name("zhuanfa-master");
+        .domain_name("iris-master");
     let dp_tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(ca);
@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
         }
         let port = f.listen_port as u16;
         // 取出多 target；兼容旧 master 只填了单 target 字符串的情形
-        let targets: Vec<zhuanfa_proto::control::TargetEndpoint> = if !f.targets.is_empty() {
+        let targets: Vec<iris_proto::control::TargetEndpoint> = if !f.targets.is_empty() {
             f.targets.clone()
         } else {
             #[allow(deprecated)]
@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
             if t.is_empty() {
                 Vec::new()
             } else {
-                vec![zhuanfa_proto::control::TargetEndpoint { addr: t, weight: 1 }]
+                vec![iris_proto::control::TargetEndpoint { addr: t, weight: 1 }]
             }
         };
         let target_strategy = if f.target_strategy.is_empty() {

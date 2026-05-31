@@ -2,11 +2,11 @@
 services:
   master:
     build: .
-    image: zhuanfa:dev
-    command: zhuanfa-master
+    image: iris:dev
+    command: iris-master
     environment:
-      ZF_LISTEN: "0.0.0.0:7443"
-      ZF_CERT_DIR: "/data/certs"
+      IRIS_LISTEN: "0.0.0.0:7443"
+      IRIS_CERT_DIR: "/data/certs"
       RUST_LOG: "info"
     ports:
       - "7443:7443"
@@ -14,14 +14,14 @@ services:
       - certs:/data/certs
 
   node:
-    image: zhuanfa:dev
-    command: zhuanfa-node
+    image: iris:dev
+    command: iris-node
     depends_on:
       - master
     environment:
-      ZF_MASTER: "https://master:7443"
-      ZF_CERT_DIR: "/data/certs"
-      ZF_NODE_ID: "node-docker-1"
+      IRIS_MASTER: "https://master:7443"
+      IRIS_CERT_DIR: "/data/certs"
+      IRIS_NODE_ID: "node-docker-1"
       RUST_LOG: "info"
     volumes:
       - certs:/data/certs

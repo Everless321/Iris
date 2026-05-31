@@ -64,12 +64,12 @@ impl CertPaths {
     }
 }
 
-/// 当前 server cert 的 SAN 版本（含 zhuanfa-master 身份名后 = v2）。
+/// 当前 server cert 的 SAN 版本（含 iris-master 身份名后 = v2）。
 /// 老版本（仅 localhost + 127.0.0.1）的部署会自动迁移：删 server pair 重签，不动 CA + 共享 client。
 const SERVER_CERT_VERSION: &str = "v2-mtls-sni";
 
 /// master 启动时确保证书齐全。CA 一次生成持久化；server pair / 共享 client pair 按需补齐。
-/// 旧 server.pem（SAN 仅 localhost+127.0.0.1）会自动迁移到 v2（加 SAN=zhuanfa-master），
+/// 旧 server.pem（SAN 仅 localhost+127.0.0.1）会自动迁移到 v2（加 SAN=iris-master），
 /// CA + 已签发的 node cert 不动 — 滚动升级安全。
 pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
     let paths = CertPaths::under(dir);
@@ -82,7 +82,7 @@ pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
         let ca_key = KeyPair::generate().context("gen ca key")?;
         let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, "zhuanfa-ca");
+        ca_params.distinguished_name.push(DnType::CommonName, "iris-ca");
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca_cert = ca_params.self_signed(&ca_key).context("self-sign ca")?;
         fs::write(&paths.ca, ca_cert.pem())?;
@@ -99,13 +99,13 @@ pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
         Ok(v) if v.trim() == SERVER_CERT_VERSION
     );
     if server_missing || version_stale {
-        // SAN 加 zhuanfa-master（节点 dial 时 SNI 用此身份名）；保留 localhost+127.0.0.1 兼容旧 client。
+        // SAN 加 iris-master（节点 dial 时 SNI 用此身份名）；保留 localhost+127.0.0.1 兼容旧 client。
         let san = vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
-            "zhuanfa-master".to_string(),
+            "iris-master".to_string(),
         ];
-        let (server_pem, server_key_pem) = leaf(&san, "zhuanfa-master", &ca_cert, &ca_key)?;
+        let (server_pem, server_key_pem) = leaf(&san, "iris-master", &ca_cert, &ca_key)?;
         fs::write(&paths.server, server_pem)?;
         write_with_mode(&paths.server_key, &server_key_pem, 0o600)?;
         write_with_mode(&version_marker, SERVER_CERT_VERSION, 0o600)?;
@@ -114,7 +114,7 @@ pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
     // 共享 client pair：master 反向 probe 节点时复用（per-call domain_name=目标 node_id）。缺则补。
     if !Path::new(&paths.client).exists() || !Path::new(&paths.client_key).exists() {
         let san = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        let (client_pem, client_key_pem) = leaf(&san, "zhuanfa-node", &ca_cert, &ca_key)?;
+        let (client_pem, client_key_pem) = leaf(&san, "iris-node", &ca_cert, &ca_key)?;
         fs::write(&paths.client, client_pem)?;
         write_with_mode(&paths.client_key, &client_key_pem, 0o600)?;
     }
@@ -147,7 +147,7 @@ pub fn sign_node_cert(
     let mut params = CertificateParams::new(san)?;
     params
         .distinguished_name
-        .push(DnType::CommonName, format!("zhuanfa-node-{node_id}"));
+        .push(DnType::CommonName, format!("iris-node-{node_id}"));
     let cert = params.signed_by(&key, &ca_cert, &ca_key).context("sign node leaf")?;
     let ca_pem = fs::read_to_string(format!("{dir}/ca.pem"))?;
     Ok((cert.pem(), key.serialize_pem(), ca_pem))

@@ -8,7 +8,7 @@
 //   - 后续 UDP packet 用 QUIC datagram (unreliable/unordered) 传递
 //   - exit 节点 unmarshal datagram → UdpSocket::send 给 target；反向同理
 //
-// ALPN: "zf-quic-1"（避免和其它 QUIC 服务混淆）
+// ALPN: "iris-quic-1"（避免和其它 QUIC 服务混淆）
 
 use anyhow::{anyhow, Context, Result};
 use prost::Message;
@@ -19,9 +19,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use zhuanfa_proto::control::TunnelHeader;
+use iris_proto::control::TunnelHeader;
 
-const ALPN: &[&[u8]] = &[b"zf-quic-1"];
+const ALPN: &[&[u8]] = &[b"iris-quic-1"];
 const DATAGRAM_BUF: usize = 64 * 1024 * 1024;
 const IDLE_TIMEOUT_SECS: u64 = 30;
 const INITIAL_MTU: u16 = 1200;
@@ -130,7 +130,7 @@ use crate::dataplane::{effective_targets, NodeCtx, TargetRouter, UDP_BUF};
 use crate::lb::LoadBalancer;
 use crate::sock;
 use std::net::{IpAddr, Ipv4Addr};
-use zhuanfa_proto::control::{Hop, TargetEndpoint};
+use iris_proto::control::{Hop, TargetEndpoint};
 
 pub async fn serve(
     endpoint: Endpoint,

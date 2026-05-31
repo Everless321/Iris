@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-use zhuanfa_proto::control::{Hop, HopNode};
+use iris_proto::control::{Hop, HopNode};
 
 /// 单节点最大权重，防止恶意/误配权重导致 expand 内存爆炸。
 const MAX_WEIGHT: u32 = 1000;

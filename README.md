@@ -1,4 +1,4 @@
-# Zhuanfa · 高性能转发平台
+# Iris · 高性能转发平台
 
 基于 Rust 的多级连跳转发控制平台，主控/节点架构。差异化定位：**智能调度 + SLA 承诺 + 全链路故障转移**。
 
@@ -62,18 +62,18 @@ bash scripts/demo-midfail.sh   # 中转故障转移
 
 ```bash
 # 启动 master（探测间隔可配）
-ZF_PROBE_INTERVAL=15 ./target/debug/zhuanfa-master
+IRIS_PROBE_INTERVAL=15 ./target/debug/iris-master
 
 # 注册节点（带权重）
-zhuanfa-cli add-node --id a --name entry --addr 1.2.3.4:7444
-zhuanfa-cli add-node --id b1 --name exit1 --addr 5.6.7.8:7444 --weight 3
+iris-cli add-node --id a --name entry --addr 1.2.3.4:7444
+iris-cli add-node --id b1 --name exit1 --addr 5.6.7.8:7444 --weight 3
 
 # 创建负载均衡转发：a → [b1:3,b2:1 加权] → 目标
-zhuanfa-cli add-forward --name relay --listen 10080 \
+iris-cli add-forward --name relay --listen 10080 \
   --hops "a | b1:3,b2:1@weighted" --target 目标:端口
 
 # 启动节点
-ZF_NODE_ID=a ZF_DATA_ADDR=0.0.0.0:7444 ZF_MASTER=https://master:7443 ./target/debug/zhuanfa-node
+IRIS_NODE_ID=a IRIS_DATA_ADDR=0.0.0.0:7444 IRIS_MASTER=https://master:7443 ./target/debug/iris-node
 
 # 查看 SLA
 curl localhost:7080/api/sla
@@ -95,14 +95,14 @@ curl localhost:7080/metrics
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ZF_LISTEN` | `0.0.0.0:7443` | master gRPC 监听 |
-| `ZF_HTTP` | `0.0.0.0:7080` | master HTTP API |
-| `ZF_DB` | `sqlite://data/zhuanfa.db` | 数据库 |
-| `ZF_PROBE_INTERVAL` | `15` | 探测间隔（秒）|
-| `ZF_FAIL_THRESHOLD` | `2` | 连续失败几次判不健康 |
-| `ZF_MASTER` | `https://127.0.0.1:7443` | node 连接的 master |
-| `ZF_NODE_ID` | `node-dev-1` | 节点标识 |
-| `ZF_DATA_ADDR` | `0.0.0.0:7444` | node 数据面监听 |
+| `IRIS_LISTEN` | `0.0.0.0:7443` | master gRPC 监听 |
+| `IRIS_HTTP` | `0.0.0.0:7080` | master HTTP API |
+| `IRIS_DB` | `sqlite://data/iris.db` | 数据库 |
+| `IRIS_PROBE_INTERVAL` | `15` | 探测间隔（秒）|
+| `IRIS_FAIL_THRESHOLD` | `2` | 连续失败几次判不健康 |
+| `IRIS_MASTER` | `https://127.0.0.1:7443` | node 连接的 master |
+| `IRIS_NODE_ID` | `node-dev-1` | 节点标识 |
+| `IRIS_DATA_ADDR` | `0.0.0.0:7444` | node 数据面监听 |
 
 ## 开发进度
 
