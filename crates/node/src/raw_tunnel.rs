@@ -16,7 +16,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter, UDP_BUF};
+use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter};
 use crate::lb::{LoadBalancer, NodeView};
 use crate::sock;
 use zhuanfa_proto::control::{Hop, TargetEndpoint, TunnelHeader};
@@ -167,13 +167,16 @@ async fn handle_conn(
         .await?
         .ok_or_else(|| anyhow!("missing tunnel header"))?;
     let header = TunnelHeader::decode(&*header_bytes).context("decode TunnelHeader")?;
-
+    // Phase 9c 后 raw_tunnel 仅服务 TCP 路径。UDP 走 quic_tunnel。
+    // 容错：收到带 udp_src_addr 的 header 说明对端是 stale node，记 warn 拒绝。
+    if !header.udp_src_addr.is_empty() {
+        return Err(anyhow!(
+            "raw_tunnel received UDP-marked header from stale peer (src={})",
+            header.udp_src_addr
+        ));
+    }
     if header.remaining_hops.is_empty() {
-        if header.udp_src_addr.is_empty() {
-            exit_tcp(&header, &tr, r, w).await
-        } else {
-            exit_udp(&header, &tr, r, w).await
-        }
+        exit_tcp(&header, &tr, r, w).await
     } else {
         relay(&header, ctx, lb, tls_connector, r, w).await
     }
@@ -233,63 +236,6 @@ async fn exit_tcp(
                         break;
                     }
                 }
-            }
-        }
-    });
-    link(up, down);
-    Ok(())
-}
-
-async fn exit_udp(
-    header: &TunnelHeader,
-    tr: &TargetRouter,
-    mut r: ReadHalf<ServerTlsStream<TcpStream>>,
-    mut w: WriteHalf<ServerTlsStream<TcpStream>>,
-) -> Result<()> {
-    let targets = effective_targets(header);
-    if targets.is_empty() {
-        return Err(anyhow!("no targets"));
-    }
-    let ordered = tr.order(
-        &targets,
-        &header.target_strategy,
-        &header.client_ip,
-        header.forward_id,
-    );
-    let pick = ordered
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow!("no udp target"))?;
-    let usock = sock::udp_bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
-    usock.connect(&pick).await?;
-    let usock = Arc::new(usock);
-    tracing::info!(target = %pick, src = %header.udp_src_addr, "raw exit udp picked");
-    let usock_up = usock.clone();
-    let up = tokio::spawn(async move {
-        loop {
-            match read_frame(&mut r, UDP_BUF).await {
-                Ok(Some(data)) if !data.is_empty() => {
-                    if usock_up.send(&data).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Some(_)) => continue,
-                _ => break,
-            }
-        }
-    });
-    let usock_dn = usock;
-    let down = tokio::spawn(async move {
-        let mut buf = vec![0u8; UDP_BUF];
-        loop {
-            match usock_dn.recv(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if write_frame(&mut w, &buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
             }
         }
     });
@@ -490,38 +436,3 @@ pub async fn handle_entry_tcp(
     link(up, down);
 }
 
-/// UDP 入口的反向回包 task：从 raw tunnel 读 frame → socket.send_to(src)。
-/// 由 udp_forward 调用，配合 send_udp_packet 形成 UDP session。
-pub async fn udp_recv_loop(
-    mut nr: ReadHalf<ClientTlsStream<TcpStream>>,
-    sock: Arc<tokio::net::UdpSocket>,
-    src: SocketAddr,
-    last_seen: Arc<std::sync::atomic::AtomicI64>,
-) {
-    loop {
-        match read_frame(&mut nr, UDP_BUF).await {
-            Ok(Some(data)) if !data.is_empty() => {
-                last_seen.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                let _ = sock.send_to(&data, src).await;
-            }
-            Ok(Some(_)) => continue,
-            _ => break,
-        }
-    }
-}
-
-/// UDP 入口的发送：把 packet 写入 raw tunnel。
-pub async fn udp_send_packet(
-    nw: &tokio::sync::Mutex<WriteHalf<ClientTlsStream<TcpStream>>>,
-    data: &[u8],
-) -> std::io::Result<()> {
-    let mut g = nw.lock().await;
-    write_frame(&mut *g, data).await
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}

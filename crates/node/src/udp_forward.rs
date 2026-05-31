@@ -4,14 +4,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::WriteHalf;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, RwLock};
-use tokio_rustls::client::TlsStream as ClientTlsStream;
+use tokio::sync::RwLock;
 
 use crate::dataplane::{NodeCtx, TargetRouter, UDP_BUF};
 use crate::lb::LoadBalancer;
-use crate::raw_tunnel;
+use crate::quic_tunnel;
 use crate::sock;
 use zhuanfa_proto::control::{Hop, TargetEndpoint};
 
@@ -156,8 +154,8 @@ pub async fn run_udp_single_hop(
 // 出口节点据此识别 UDP 路径。
 
 struct MultiSession {
-    /// raw_tunnel 写端，发 UDP packet 用
-    nw: Arc<Mutex<WriteHalf<ClientTlsStream<tokio::net::TcpStream>>>>,
+    /// Phase 9c：QUIC connection（每个 UDP src 一条）。Connection 是 cheap clone（内部 Arc）。
+    conn: quinn::Connection,
     last_seen: Arc<AtomicI64>,
 }
 
@@ -221,15 +219,16 @@ pub async fn run_udp_multi_hop(
         // 命中复用
         if let Some(s) = map.read().await.get(&src).cloned() {
             s.last_seen.store(now_ms(), Ordering::Relaxed);
-            if raw_tunnel::udp_send_packet(&s.nw, &data).await.is_err() {
+            if quic_tunnel::udp_send_packet(&s.conn, &data).is_err() {
                 map.write().await.remove(&src);
             }
             continue;
         }
 
-        // 新会话：起 raw 隧道
-        let view = ctx.view();
-        let (nr, nw) = match raw_tunnel::open_next_hop(
+        // 新会话：起 QUIC 连接（datagram 模式，无 backpressure）
+        let conn = match quic_tunnel::open_next_hop(
+            &ctx.quic_endpoint,
+            &ctx.quic_client_cfg,
             &ctx,
             &lb,
             &hops_rest,
@@ -237,34 +236,30 @@ pub async fn run_udp_multi_hop(
             &target_strategy,
             &src.ip().to_string(),
             forward_id,
-            1,
             &src.to_string(),
-            &view,
-            ctx.raw_connector.clone(),
         )
         .await
         {
-            Ok(x) => x,
+            Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, %src, "udp raw tunnel open failed");
+                tracing::warn!(error = %e, %src, "udp quic tunnel open failed");
                 continue;
             }
         };
         let last_seen = Arc::new(AtomicI64::new(now_ms()));
-        let nw_arc = Arc::new(Mutex::new(nw));
         let session = Arc::new(MultiSession {
-            nw: nw_arc.clone(),
+            conn: conn.clone(),
             last_seen: last_seen.clone(),
         });
         map.write().await.insert(src, session);
         {
-            let (sock_back, map_back, src_back, ls) =
-                (sock.clone(), map.clone(), src, last_seen.clone());
+            let (sock_back, map_back, src_back, ls, c) =
+                (sock.clone(), map.clone(), src, last_seen.clone(), conn.clone());
             tokio::spawn(async move {
-                raw_tunnel::udp_recv_loop(nr, sock_back, src_back, ls).await;
+                quic_tunnel::udp_recv_loop(c, sock_back, src_back, ls).await;
                 map_back.write().await.remove(&src_back);
             });
         }
-        let _ = raw_tunnel::udp_send_packet(&nw_arc, &data).await;
+        let _ = quic_tunnel::udp_send_packet(&conn, &data);
     }
 }
