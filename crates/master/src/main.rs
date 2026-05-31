@@ -8,6 +8,8 @@ mod web_assets;
 
 use anyhow::Result;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -18,6 +20,20 @@ use iris_proto::control::{
 };
 
 use models::ForwardRow;
+
+/// 每节点上报的 listener 状态视图。Heartbeat 写、API 读。
+/// key = (node_id, forward_id) 让 list_forwards O(1) 查单 forward 在某 node 的状态。
+/// 不持久化 — master 重启后第一轮心跳（≤5s）会重建。
+pub type ListenerStateView = Arc<RwLock<HashMap<(String, i64), ListenerStateEntry>>>;
+
+#[derive(Clone, Debug)]
+pub struct ListenerStateEntry {
+    pub ok: bool,
+    pub error: String,
+    pub port: u32,
+    pub protocol: String,
+    pub updated_at: i64,
+}
 
 fn grpc_addr() -> String {
     std::env::var("IRIS_LISTEN").unwrap_or_else(|_| "0.0.0.0:7443".into())
@@ -62,6 +78,7 @@ fn now_ms() -> u64 {
 
 struct ControlSvc {
     pool: SqlitePool,
+    listener_states: ListenerStateView,
 }
 
 #[tonic::async_trait]
@@ -71,7 +88,8 @@ impl Control for ControlSvc {
         req: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatReply>, Status> {
         let r = req.into_inner();
-        tracing::info!(node = %r.node_id, seq = r.seq, load = r.load, "heartbeat");
+        tracing::info!(node = %r.node_id, seq = r.seq, load = r.load,
+            listeners = r.listener_states.len(), "heartbeat");
         match sqlx::query("UPDATE nodes SET status='online', last_seen=? WHERE id=?")
             .bind(now_ms() as i64)
             .bind(&r.node_id)
@@ -83,6 +101,29 @@ impl Control for ControlSvc {
             }
             Ok(_) => {}
             Err(e) => tracing::error!(node = %r.node_id, error = %e, "更新节点状态失败"),
+        }
+        // 收集本节点上报的所有 listener_states 写入共享内存视图。
+        // 同时清掉该 node 不再上报的旧条目（forward 被删/不再入口）。
+        if !r.listener_states.is_empty() || !r.node_id.is_empty() {
+            let now = now_ms() as i64;
+            let reported: std::collections::HashSet<i64> =
+                r.listener_states.iter().map(|s| s.forward_id).collect();
+            let mut g = self.listener_states.write().unwrap();
+            // remove stale entries for this node
+            g.retain(|(nid, fid), _| nid != &r.node_id || reported.contains(fid));
+            // upsert reported
+            for s in &r.listener_states {
+                g.insert(
+                    (r.node_id.clone(), s.forward_id),
+                    ListenerStateEntry {
+                        ok: s.ok,
+                        error: s.error.clone(),
+                        port: s.port,
+                        protocol: s.protocol.clone(),
+                        updated_at: now,
+                    },
+                );
+            }
         }
         Ok(Response::new(HeartbeatReply {
             server_time: now_ms(),
@@ -219,6 +260,9 @@ async fn main() -> Result<()> {
         ))
         .domain_name("localhost");
 
+    // listener 状态共享视图：heartbeat 写 / API 读
+    let listener_states: ListenerStateView = Arc::new(RwLock::new(HashMap::new()));
+
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
     let app = api::router(api::AppState {
@@ -233,6 +277,7 @@ async fn main() -> Result<()> {
         )),
         cert_dir: cert_dir(),
         node_caller_tls,
+        listener_states: listener_states.clone(),
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
@@ -254,7 +299,7 @@ async fn main() -> Result<()> {
     let tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(client_ca);
-    let svc = ControlSvc { pool };
+    let svc = ControlSvc { pool, listener_states: listener_states.clone() };
     let addr = grpc_addr().parse()?;
     tracing::info!(%addr, "grpc control listening (mTLS)");
 

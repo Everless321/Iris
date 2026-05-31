@@ -32,6 +32,7 @@ pub struct AppState {
     pub register_rl: Arc<RateLimiter>,
     pub cert_dir: String, // master 证书目录，供节点 enrollment 时签发新证书
     pub node_caller_tls: ClientTlsConfig, // master 反向调用节点 DataPlane 用的 mTLS
+    pub listener_states: crate::ListenerStateView, // heartbeat 上报的 per-(node,forward) listener 状态
 }
 
 impl FromRef<AppState> for AuthState {
@@ -250,7 +251,27 @@ async fn list_forwards(claims: Claims, State(s): State<AppState>) -> Result<Json
         sqlx::query_as::<_, ForwardRow>("SELECT * FROM forwards WHERE owner_id=? ORDER BY id")
             .bind(claims.sub).fetch_all(&s.pool).await
     }.map_err(err)?;
-    Ok(Json(rows.into_iter().map(Forward::from).collect()))
+    let states = s.listener_states.read().unwrap().clone();
+    let mut out: Vec<Forward> = rows.into_iter().map(Forward::from).collect();
+    for f in &mut out {
+        // 入口节点 = hops[0].nodes — UI 只关心入口的 bind 状态
+        let entry_ids: Vec<String> = f
+            .hops
+            .first()
+            .map(|h| h.nodes.iter().map(|n| n.id.clone()).collect())
+            .unwrap_or_default();
+        for nid in entry_ids {
+            if let Some(st) = states.get(&(nid.clone(), f.id)) {
+                f.listener_status.push(crate::models::ListenerNodeStatus {
+                    node_id: nid,
+                    ok: st.ok,
+                    error: st.error.clone(),
+                    updated_at: st.updated_at,
+                });
+            }
+        }
+    }
+    Ok(Json(out))
 }
 
 /// 校验 forward 入口 + 端口 + 协议是否与已 enabled 的其它 forward 冲突。
@@ -372,6 +393,7 @@ async fn create_forward(
         id, name: f.name, listen_port: f.listen_port, protocol,
         hops, targets, target_strategy: f.target_strategy,
         enabled: true, created_at: now, owner_id: claims.sub,
+        listener_status: Vec::new(), // 刚创建,还未收到 heartbeat
     }))
 }
 

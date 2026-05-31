@@ -12,10 +12,24 @@ message HeartbeatRequest {
   string node_id = 1;
   uint64 seq = 2;
   double load = 3;
+  // 本节点当前所有入口 forward 的 listener 实际状态。空 = 不是入口节点
+  // 或者本周期未上报（向后兼容 — master 收到空时不更新已存视图）。
+  repeated ListenerState listener_states = 4;
 }
 message HeartbeatReply {
   uint64 server_time = 1;
   string message = 2;
+}
+
+// 入口节点 forward 实际 listen 状态（bind 是否成功）。
+// node 在 spawn_forward 时预先 probe bind，结果通过 heartbeat 上报，
+// master 据此提示 UI 「端口被 OS 层其他进程占用」之类问题。
+message ListenerState {
+  int64 forward_id = 1;
+  uint32 port = 2;
+  string protocol = 3; // tcp | udp | tcp+udp
+  bool ok = 4;
+  string error = 5;    // ok=false 时填错误原因 (EADDRINUSE / Permission denied 等)
 }
 
 message SyncRequest {
