@@ -32,6 +32,6 @@ ureq = { version = "2", features = ["json"] }
 argon2 = "0.5"
 jsonwebtoken = "9"
 uuid = { version = "1", features = ["v4"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip", "compression-br", "compression-deflate"] }
 rust-embed = "8"
 mime_guess = "2"
