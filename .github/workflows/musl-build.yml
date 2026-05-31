@@ -25,10 +25,11 @@ jobs:
 
       - name: Build web
         working-directory: web
-        # --include=optional：rollup 把 linux-x64-gnu 等放 optionalDependencies，
-        # lock 文件含 macOS arm64 时 npm ci 不会装其它平台，需显式拉。
+        # 不用 lock 文件：rollup native binary 在 lock 里是 platform-specific
+        # （macOS 生成的 lock 在 Linux runner 上少 linux-x64-gnu），临时用 npm install
+        # 不固定版本。task #15 留到 lock 跨平台问题彻底解决后再 enable npm ci
         run: |
-          npm ci --include=optional --no-audit --no-fund
+          npm install --include=optional --no-audit --no-fund
           npm run build
 
       - name: Install musl tools
