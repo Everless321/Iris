@@ -33,7 +33,7 @@ pub fn build_configs(
     cert_pem: &[u8],
     key_pem: &[u8],
 ) -> Result<(Arc<ServerConfig>, Arc<ClientConfig>)> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(ca_pem))
         .filter_map(|r| r.ok())
