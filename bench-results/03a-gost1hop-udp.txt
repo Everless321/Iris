@@ -1,0 +1,1 @@
+jq: error (at <stdin>:10): null (null) and number (1000000000) cannot be divided

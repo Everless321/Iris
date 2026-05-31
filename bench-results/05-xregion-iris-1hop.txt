@@ -1,0 +1,8 @@
+
+============ iris 跨区域 1-hop (uc1→ap→uc4) ============
+all 6 nodes restarted; wait 12s for sync_config + listener
+LISTEN ok
+--- TCP -P 1 ---
+bps=0.12250425989730969 Gbps, retrans=0
+--- TCP -P 8 ---
+bps=0.828085102365386 Gbps
