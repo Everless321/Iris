@@ -1,0 +1,6 @@
+
+============ iris 3-hop (aws-lc-rs) ============
+forward created
+uc2:18388 LISTEN
+--- TCP -P 1 (20s) ---
+bps=3.0673185669337073 Gbps, retrans=0
