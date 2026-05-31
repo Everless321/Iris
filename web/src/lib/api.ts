@@ -69,6 +69,12 @@ export type Node = {
 export type HopNode = { id: string; weight: number };
 export type Hop = { strategy: string; nodes: HopNode[] };
 export type TargetEndpoint = { addr: string; weight: number };
+export type ListenerNodeStatus = {
+  node_id: string;
+  ok: boolean;
+  error: string;
+  updated_at: number;
+};
 export type Forward = {
   id: number;
   name: string;
@@ -79,6 +85,7 @@ export type Forward = {
   target_strategy: string;
   enabled: boolean;
   created_at: number;
+  listener_status?: ListenerNodeStatus[];
 };
 export type Enrollment = {
   token: string;

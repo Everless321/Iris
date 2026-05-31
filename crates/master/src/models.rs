@@ -139,6 +139,19 @@ pub struct Forward {
     pub enabled: bool,
     pub created_at: i64,
     pub owner_id: i64,
+    /// 每个入口节点的 listener 实际状态。空 = 还未收到 heartbeat（master 重启后第一轮）
+    /// 或者该 forward 不是入口（已被 master sync_config 过滤）
+    #[serde(default)]
+    pub listener_status: Vec<ListenerNodeStatus>,
+}
+
+/// 单个入口节点的 listener 状态。前端 forward list 显示徽章 + tooltip。
+#[derive(Debug, Serialize, Clone)]
+pub struct ListenerNodeStatus {
+    pub node_id: String,
+    pub ok: bool,
+    pub error: String,
+    pub updated_at: i64,
 }
 
 impl From<ForwardRow> for Forward {
@@ -161,6 +174,7 @@ impl From<ForwardRow> for Forward {
             enabled: r.enabled != 0,
             created_at: r.created_at,
             owner_id: r.owner_id,
+            listener_status: Vec::new(),
         }
     }
 }

@@ -20,13 +20,31 @@ use tonic::transport::{
 };
 use iris_proto::control::control_client::ControlClient;
 use iris_proto::control::data_plane_server::DataPlaneServer;
-use iris_proto::control::{ForwardRule, HeartbeatRequest, NodeAddr, SyncRequest};
+use iris_proto::control::{ForwardRule, HeartbeatRequest, ListenerState, NodeAddr, SyncRequest};
 
 /// 一条已激活 forward 的句柄：rule 全量快照（用于 diff 判定是否需要重启），
 /// handles 持 TCP/UDP listener task 的 JoinHandle（abort 即可关闭 listener + 释放端口）。
+/// status 是 spawn 时预先 probe bind 的结果，heartbeat 时上报给 master。
 struct ActiveForward {
     rule: ForwardRule,
     handles: Vec<JoinHandle<()>>,
+    status: ListenerState,
+}
+
+/// probe 一个端口能否在所有协议上 bind。成功立即 drop 释放端口，失败返回错误描述。
+/// TOCTOU 窗口 ~1ms（probe 后 drop → 实际 spawn 内 bind），SO_REUSEADDR 已开避免冲突。
+fn probe_bind(port: u16, has_tcp: bool, has_udp: bool) -> Result<(), String> {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+    if has_tcp {
+        sock::tcp_listen(addr)
+            .map_err(|e| format!("tcp bind {port}: {e}"))?;
+    }
+    if has_udp {
+        sock::udp_bind(addr)
+            .map_err(|e| format!("udp bind {port}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// 按 ForwardRule 启动 TCP/UDP listener task，返回 ActiveForward（含 abort handles）。
@@ -79,6 +97,23 @@ fn spawn_forward(
     let port = f.listen_port as u16;
     let fid = f.id;
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
+
+    // 预先 probe bind：能 bind 就 spawn 实际 task；失败则不 spawn，仅记 status 上报 master。
+    // 失败常见原因：EADDRINUSE (OS 层端口被其他进程占)、Permission denied (port<1024 非 root)。
+    if let Err(reason) = probe_bind(port, has_tcp, has_udp) {
+        tracing::warn!(forward_id = fid, port, %reason, "listener probe bind failed; not spawning");
+        return Some(ActiveForward {
+            rule: f.clone(),
+            handles,
+            status: ListenerState {
+                forward_id: fid,
+                port: port as u32,
+                protocol: f.protocol.clone(),
+                ok: false,
+                error: reason,
+            },
+        });
+    }
 
     if has_tcp {
         if f.hops.len() == 1 {
@@ -138,7 +173,19 @@ fn spawn_forward(
     Some(ActiveForward {
         rule: f.clone(),
         handles,
+        status: ListenerState {
+            forward_id: fid,
+            port: port as u32,
+            protocol: f.protocol.clone(),
+            ok: true,
+            error: String::new(),
+        },
     })
+}
+
+/// 收集 active_forwards 状态用于 heartbeat 上报。
+fn collect_listener_states(active: &HashMap<i64, ActiveForward>) -> Vec<ListenerState> {
+    active.values().map(|af| af.status.clone()).collect()
 }
 
 /// 心跳循环每次 sync_config 后调用：对比新 forwards vs 当前 active，启停 listener。
@@ -393,8 +440,14 @@ async fn main() -> Result<()> {
     loop {
         tick.tick().await;
         seq += 1;
+        let listener_states = collect_listener_states(&active_forwards);
         if let Err(e) = client
-            .heartbeat(HeartbeatRequest { node_id: node_id.clone(), seq, load: 0.0 })
+            .heartbeat(HeartbeatRequest {
+                node_id: node_id.clone(),
+                seq,
+                load: 0.0,
+                listener_states,
+            })
             .await
         {
             tracing::warn!(seq, error = %e, "heartbeat failed");

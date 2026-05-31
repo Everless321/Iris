@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Table, Button, Card, Tag, Space, Typography, Popconfirm, Empty, App,
+  Table, Button, Card, Tag, Space, Typography, Popconfirm, Empty, App, Tooltip,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -58,6 +58,12 @@ export default function Forwards() {
       title: "路径",
       key: "hops",
       render: (_, f) => <PathInline f={f} />,
+    },
+    {
+      title: "Listener",
+      key: "listener_status",
+      width: 130,
+      render: (_, f) => <ListenerBadge f={f} />,
     },
     {
       title: "目标",
@@ -134,6 +140,43 @@ export default function Forwards() {
         />
       </Card>
     </div>
+  );
+}
+
+function ListenerBadge({ f }: { f: Forward }) {
+  const states = f.listener_status ?? [];
+  if (states.length === 0) {
+    return <Tag color="default" style={{ margin: 0, fontSize: 11 }}>等待心跳</Tag>;
+  }
+  const okCount = states.filter((s) => s.ok).length;
+  const total = states.length;
+  const allOk = okCount === total;
+  const allFail = okCount === 0;
+  const color = allOk ? "success" : allFail ? "error" : "warning";
+  const label = allOk ? `运行 ${okCount}/${total}` : `${okCount}/${total} 正常`;
+  const tip = (
+    <div style={{ fontSize: 12, maxWidth: 320 }}>
+      {states.map((s) => (
+        <div key={s.node_id} style={{ marginBottom: 4 }}>
+          <Tag color={s.ok ? "success" : "error"} style={{ margin: 0, marginRight: 6, fontSize: 11 }}>
+            {s.ok ? "OK" : "FAIL"}
+          </Tag>
+          <span style={{ fontFamily: "monospace" }}>{s.node_id}</span>
+          {!s.ok && s.error && (
+            <div style={{ color: "#ff7875", marginTop: 2, fontFamily: "monospace", fontSize: 11 }}>
+              {s.error}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+  return (
+    <Tooltip title={tip} placement="left">
+      <Tag color={color} style={{ margin: 0, fontSize: 11, cursor: "help" }}>
+        {label}
+      </Tag>
+    </Tooltip>
   );
 }
 
