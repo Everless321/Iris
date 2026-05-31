@@ -268,31 +268,13 @@ async fn relay(
     )
     .await?;
 
-    let up = tokio::spawn(async move {
-        loop {
-            match read_frame(&mut r, MAX_FRAME).await {
-                Ok(Some(data)) => {
-                    if write_frame(&mut nw, &data).await.is_err() {
-                        break;
-                    }
-                }
-                _ => break,
-            }
-        }
-    });
-    let down = tokio::spawn(async move {
-        loop {
-            match read_frame(&mut nr, MAX_FRAME).await {
-                Ok(Some(data)) => {
-                    if write_frame(&mut w, &data).await.is_err() {
-                        break;
-                    }
-                }
-                _ => break,
-            }
-        }
-    });
-    link(up, down);
+    // 中转 = 解密后的明文字节流透传。frame 边界在 entry/exit 维护，relay 不需要解析。
+    // tokio::io::copy 用 8KB 栈 buffer 流式拷贝，无 Vec alloc + 无 length-prefix decode + 无 task spawn 开销。
+    // 任一方向 EOF/Err 自动结束（try_join 任一 Err 立即 cancel 另一边，等价原 link 行为）。
+    let _ = tokio::try_join!(
+        tokio::io::copy(&mut r, &mut nw),
+        tokio::io::copy(&mut nr, &mut w),
+    );
     Ok(())
 }
 
