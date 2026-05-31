@@ -14,12 +14,217 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tonic::transport::{
     Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig,
 };
 use iris_proto::control::control_client::ControlClient;
 use iris_proto::control::data_plane_server::DataPlaneServer;
-use iris_proto::control::{HeartbeatRequest, NodeAddr, SyncRequest};
+use iris_proto::control::{ForwardRule, HeartbeatRequest, NodeAddr, SyncRequest};
+
+/// 一条已激活 forward 的句柄：rule 全量快照（用于 diff 判定是否需要重启），
+/// handles 持 TCP/UDP listener task 的 JoinHandle（abort 即可关闭 listener + 释放端口）。
+struct ActiveForward {
+    rule: ForwardRule,
+    handles: Vec<JoinHandle<()>>,
+}
+
+/// 按 ForwardRule 启动 TCP/UDP listener task，返回 ActiveForward（含 abort handles）。
+/// 仅当本节点是 hops[0]（入口）且 targets 非空时启动；否则返回 None。
+fn spawn_forward(
+    f: &ForwardRule,
+    node_id: &str,
+    ctx: &Arc<NodeCtx>,
+    lb: &Arc<LoadBalancer>,
+    target_router: &Arc<dataplane::TargetRouter>,
+) -> Option<ActiveForward> {
+    let is_entry = f
+        .hops
+        .first()
+        .map(|h| h.nodes.iter().any(|n| n.id == node_id))
+        == Some(true);
+    if !is_entry {
+        return None;
+    }
+
+    let targets: Vec<iris_proto::control::TargetEndpoint> = if !f.targets.is_empty() {
+        f.targets.clone()
+    } else {
+        #[allow(deprecated)]
+        let t = f.target.trim().to_string();
+        if t.is_empty() {
+            return None;
+        }
+        vec![iris_proto::control::TargetEndpoint { addr: t, weight: 1 }]
+    };
+    if targets.is_empty() {
+        tracing::warn!(forward_id = f.id, "forward 没有 target，跳过 entry 启动");
+        return None;
+    }
+
+    let target_strategy = if f.target_strategy.is_empty() {
+        "weighted".to_string()
+    } else {
+        f.target_strategy.clone()
+    };
+    let parts: Vec<&str> = f
+        .protocol
+        .split('+')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let has_tcp = parts.is_empty() || parts.iter().any(|p| *p == "tcp");
+    let has_udp = parts.iter().any(|p| *p == "udp");
+
+    let port = f.listen_port as u16;
+    let fid = f.id;
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+
+    if has_tcp {
+        if f.hops.len() == 1 {
+            let (t, s) = (targets.clone(), target_strategy.clone());
+            handles.push(tokio::spawn(async move {
+                if let Err(e) = forward::run_single_hop(port, fid, t, s).await {
+                    tracing::error!(error = %e, "tcp single-hop entry exited");
+                }
+            }));
+        } else {
+            let (hops, t, s, ctx2, lb2) = (
+                f.hops.clone(),
+                targets.clone(),
+                target_strategy.clone(),
+                ctx.clone(),
+                lb.clone(),
+            );
+            handles.push(tokio::spawn(async move {
+                if let Err(e) =
+                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2).await
+                {
+                    tracing::error!(error = %e, "tcp multi-hop entry exited");
+                }
+            }));
+        }
+    }
+    if has_udp {
+        if f.hops.len() == 1 {
+            let (t, s, tr) = (
+                targets.clone(),
+                target_strategy.clone(),
+                target_router.clone(),
+            );
+            handles.push(tokio::spawn(async move {
+                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr).await {
+                    tracing::error!(error = %e, "udp single-hop entry exited");
+                }
+            }));
+        } else {
+            let (hops, t, s, ctx2, lb2) = (
+                f.hops.clone(),
+                targets.clone(),
+                target_strategy.clone(),
+                ctx.clone(),
+                lb.clone(),
+            );
+            handles.push(tokio::spawn(async move {
+                if let Err(e) =
+                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2).await
+                {
+                    tracing::error!(error = %e, "udp multi-hop entry exited");
+                }
+            }));
+        }
+    }
+
+    Some(ActiveForward {
+        rule: f.clone(),
+        handles,
+    })
+}
+
+/// 心跳循环每次 sync_config 后调用：对比新 forwards vs 当前 active，启停 listener。
+/// - 删除：abort 旧 handles + 从 map 移除
+/// - 新增 / 不再 / 重新成为入口节点 / 关键字段变化：abort 旧的（若有）+ spawn 新的
+/// - rule 完全相同：保持不动
+fn reconcile_forwards(
+    new_forwards: &[ForwardRule],
+    active: &mut HashMap<i64, ActiveForward>,
+    node_id: &str,
+    ctx: &Arc<NodeCtx>,
+    lb: &Arc<LoadBalancer>,
+    target_router: &Arc<dataplane::TargetRouter>,
+) {
+    let new_ids: std::collections::HashSet<i64> = new_forwards.iter().map(|f| f.id).collect();
+
+    // 1. 停掉消失的 forward
+    let to_remove: Vec<i64> = active
+        .keys()
+        .filter(|id| !new_ids.contains(id))
+        .copied()
+        .collect();
+    for id in to_remove {
+        if let Some(af) = active.remove(&id) {
+            for h in &af.handles {
+                h.abort();
+            }
+            tracing::info!(
+                forward_id = id,
+                port = af.rule.listen_port,
+                "forward removed: listener stopped"
+            );
+        }
+    }
+
+    // 2. 新增 / 改动
+    for f in new_forwards {
+        let fid = f.id;
+        let still_entry = f
+            .hops
+            .first()
+            .map(|h| h.nodes.iter().any(|n| n.id == node_id))
+            == Some(true);
+
+        if !still_entry {
+            if let Some(af) = active.remove(&fid) {
+                for h in &af.handles {
+                    h.abort();
+                }
+                tracing::info!(forward_id = fid, "no longer entry: listener stopped");
+            }
+            continue;
+        }
+
+        // 已激活 + rule 完全相同 → 复用
+        if let Some(existing) = active.get(&fid) {
+            if existing.rule == *f {
+                continue;
+            }
+            // 字段变了 → 重启
+            if let Some(af) = active.remove(&fid) {
+                for h in &af.handles {
+                    h.abort();
+                }
+                tracing::info!(
+                    forward_id = fid,
+                    old_port = af.rule.listen_port,
+                    new_port = f.listen_port,
+                    "forward changed: restarting listener"
+                );
+            }
+        }
+
+        // spawn 新 listener（注意 spawn_forward 会再校验 is_entry / targets，幂等）
+        if let Some(af) = spawn_forward(f, node_id, ctx, lb, target_router) {
+            tracing::info!(
+                forward_id = fid,
+                port = af.rule.listen_port,
+                proto = %af.rule.protocol,
+                hops = af.rule.hops.len(),
+                "forward listener spawned"
+            );
+            active.insert(fid, af);
+        }
+    }
+}
 
 fn build_nodes(ns: &[NodeAddr]) -> HashMap<String, NodeInfo> {
     ns.iter()
@@ -171,98 +376,18 @@ async fn main() -> Result<()> {
         });
     }
 
-    // 启动入口监听器（本节点出现在某转发的第一跳节点组中）
-    for f in reply.forwards {
-        let is_entry = f
-            .hops
-            .first()
-            .map(|h| h.nodes.iter().any(|n| n.id == node_id))
-            == Some(true);
-        if !is_entry {
-            continue;
-        }
-        let port = f.listen_port as u16;
-        // 取出多 target；兼容旧 master 只填了单 target 字符串的情形
-        let targets: Vec<iris_proto::control::TargetEndpoint> = if !f.targets.is_empty() {
-            f.targets.clone()
-        } else {
-            #[allow(deprecated)]
-            let t = f.target.trim().to_string();
-            if t.is_empty() {
-                Vec::new()
-            } else {
-                vec![iris_proto::control::TargetEndpoint { addr: t, weight: 1 }]
-            }
-        };
-        let target_strategy = if f.target_strategy.is_empty() {
-            "weighted".to_string()
-        } else {
-            f.target_strategy.clone()
-        };
-        if targets.is_empty() {
-            tracing::warn!(forward_id = f.id, "forward 没有 target，跳过 entry 启动");
-            continue;
-        }
-        let fid = f.id;
-        // 协议派发：tcp / udp / tcp+udp 任意组合；空字符串当 tcp（兼容）
-        let parts: Vec<&str> = f
-            .protocol
-            .split('+')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        let has_tcp = parts.is_empty() || parts.iter().any(|p| *p == "tcp");
-        let has_udp = parts.iter().any(|p| *p == "udp");
+    // 启动入口监听器 + 后续 sync_config 时 reconcile（热加载，无需 restart node）
+    let mut active_forwards: HashMap<i64, ActiveForward> = HashMap::new();
+    reconcile_forwards(
+        &reply.forwards,
+        &mut active_forwards,
+        &node_id,
+        &ctx,
+        &lb,
+        &target_router,
+    );
 
-        if has_tcp {
-            if f.hops.len() == 1 {
-                let (t, s) = (targets.clone(), target_strategy.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = forward::run_single_hop(port, fid, t, s).await {
-                        tracing::error!(error = %e, "tcp single-hop entry exited");
-                    }
-                });
-            } else {
-                let (hops, t, s, ctx2, lb2) = (
-                    f.hops.clone(), targets.clone(), target_strategy.clone(),
-                    ctx.clone(), lb.clone(),
-                );
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2).await
-                    {
-                        tracing::error!(error = %e, "tcp multi-hop entry exited");
-                    }
-                });
-            }
-        }
-        if has_udp {
-            if f.hops.len() == 1 {
-                let (t, s, tr) = (
-                    targets.clone(), target_strategy.clone(), target_router.clone(),
-                );
-                tokio::spawn(async move {
-                    if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr).await {
-                        tracing::error!(error = %e, "udp single-hop entry exited");
-                    }
-                });
-            } else {
-                let (hops, t, s, ctx2, lb2) = (
-                    f.hops.clone(), targets.clone(), target_strategy.clone(),
-                    ctx.clone(), lb.clone(),
-                );
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2).await
-                    {
-                        tracing::error!(error = %e, "udp multi-hop entry exited");
-                    }
-                });
-            }
-        }
-    }
-
-    // 心跳循环
+    // 心跳循环：5s 一次。同时刷新节点视图 + 同步 forward listener 状态。
     let mut seq = 0u64;
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
@@ -274,12 +399,20 @@ async fn main() -> Result<()> {
         {
             tracing::warn!(seq, error = %e, "heartbeat failed");
         }
-        // 周期刷新节点健康/延迟视图（驱动 LB 跳过不健康节点）
         if let Ok(r) = client
             .sync_config(SyncRequest { node_id: node_id.clone() })
             .await
         {
-            *ctx.nodes.write().unwrap() = build_nodes(&r.into_inner().nodes);
+            let reply = r.into_inner();
+            *ctx.nodes.write().unwrap() = build_nodes(&reply.nodes);
+            reconcile_forwards(
+                &reply.forwards,
+                &mut active_forwards,
+                &node_id,
+                &ctx,
+                &lb,
+                &target_router,
+            );
         }
     }
 }
