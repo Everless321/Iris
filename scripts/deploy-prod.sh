@@ -84,28 +84,37 @@ run_all() {
     wait
 }
 
-echo "==> [1/6] 停所有 zhuanfa-node"
-run_all "systemctl stop zhuanfa-node 2>/dev/null || true"
-
-echo "==> [2/6] 停 zhuanfa-master @ ${NAMES[$MASTER_INDEX]}"
-ssh_run "$MASTER_INDEX" "systemctl stop zhuanfa-master 2>/dev/null || true"
-
-echo "==> [3/6] 推 node binary 到所有节点"
+echo "==> [1/4] 推 node binary 到所有节点（替换 file，老进程仍跑老 fd）"
 for ((i=0; i<N; i++)); do
     echo "    [${NAMES[$i]}] scp zhuanfa-node"
     scp_to "$i" "$NODE_BIN" "/opt/zhuanfa/zhuanfa-node.new"
     ssh_run "$i" "chmod +x /opt/zhuanfa/zhuanfa-node.new && mv -f /opt/zhuanfa/zhuanfa-node.new /opt/zhuanfa/zhuanfa-node && md5sum /opt/zhuanfa/zhuanfa-node | awk '{print \$1}'"
 done
 
-echo "==> [4/6] 推 master binary 到 ${NAMES[$MASTER_INDEX]}"
+echo "==> [2/4] 推 master binary 到 ${NAMES[$MASTER_INDEX]}"
 scp_to "$MASTER_INDEX" "$MASTER_BIN" "/opt/zhuanfa/zhuanfa-master.new"
 ssh_run "$MASTER_INDEX" "chmod +x /opt/zhuanfa/zhuanfa-master.new && mv -f /opt/zhuanfa/zhuanfa-master.new /opt/zhuanfa/zhuanfa-master && md5sum /opt/zhuanfa/zhuanfa-master | awk '{print \$1}'"
 
-echo "==> [5/6] 启 zhuanfa-master + 等 7080 ready"
-ssh_run "$MASTER_INDEX" "systemctl start zhuanfa-master && sleep 3 && curl -fsS http://127.0.0.1:7080/healthz"
+echo "==> [3/4] restart zhuanfa-master @ ${NAMES[$MASTER_INDEX]} + 等 7080 ready"
+# restart 不论老进程活着没都重启，避免 stop 失败 → start no-op 的坑
+ssh_run "$MASTER_INDEX" "systemctl restart zhuanfa-master && sleep 3 && curl -fsS http://127.0.0.1:7080/healthz"
 
-echo "==> [6/6] 启所有 zhuanfa-node"
-run_all "systemctl start zhuanfa-node && sleep 2 && systemctl is-active zhuanfa-node"
+echo "==> [4/4] restart 所有 zhuanfa-node + 校验跑的是新 binary"
+NODE_MD5=$(md5 -q "$NODE_BIN" 2>/dev/null || md5sum "$NODE_BIN" | awk '{print $1}')
+echo "    expected node md5: $NODE_MD5"
+for ((i=0; i<N; i++)); do
+    name=${NAMES[$i]}
+    # 最多 3 次重试（rfchost fail2ban 偶发）
+    for attempt in 1 2 3; do
+        out=$(ssh_run "$i" "systemctl restart zhuanfa-node && sleep 3 && pid=\$(pgrep -x zhuanfa-node | head -1) && md5sum /proc/\$pid/exe | awk '{print \$1}'" 2>&1 | grep -v Warning | tail -1)
+        if [ "$out" = "$NODE_MD5" ]; then
+            echo "    ✅ $name → $out"
+            break
+        fi
+        echo "    ⚠️  $name attempt $attempt got: $out  retry 5s..."
+        sleep 5
+    done
+done
 
 echo
 echo "==> 烟测：master 看节点心跳（15s 内）"
