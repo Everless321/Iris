@@ -333,6 +333,7 @@ pub async fn open_next_hop(
             None => continue,
         };
         match try_open(
+            node_id,
             &raw_addr,
             &rest,
             targets,
@@ -360,6 +361,7 @@ pub async fn open_next_hop(
 
 #[allow(deprecated, clippy::too_many_arguments)]
 async fn try_open(
+    peer_node_id: &str,
     addr: &str,
     rest_hops: &[Hop],
     targets: &[TargetEndpoint],
@@ -374,7 +376,8 @@ async fn try_open(
     WriteHalf<ClientTlsStream<TcpStream>>,
 )> {
     let sock = sock::tcp_connect(addr).await?;
-    let server_name = ServerName::try_from("localhost")?;
+    // SNI 用对方 node_id：rustls 校验对端 cert SAN 含此 node_id，绑定 cert 到具体节点身份。
+    let server_name = ServerName::try_from(peer_node_id.to_string())?;
     let tls = tls_connector.connect(server_name, sock).await?;
     let (r, mut w) = tokio::io::split(tls);
 

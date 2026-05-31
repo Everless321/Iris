@@ -337,7 +337,8 @@ async fn open_next_hop_inner(
             Some(a) => a,
             None => continue,
         };
-        let conn = match dial(endpoint, client_cfg, quic_addr, "localhost").await {
+        // SNI 用对方 node_id：rustls 校验对端 cert SAN 含此 node_id，绑定 cert 到具体节点身份。
+        let conn = match dial(endpoint, client_cfg, quic_addr, node_id).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(node = %node_id, error = %e, "quic next-hop dial");

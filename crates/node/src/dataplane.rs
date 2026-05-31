@@ -156,9 +156,15 @@ impl NodeCtx {
     }
 }
 
-pub async fn connect_dataplane(ctx: &NodeCtx, addr: &str) -> Result<Channel> {
+pub async fn connect_dataplane(
+    ctx: &NodeCtx,
+    peer_node_id: &str,
+    addr: &str,
+) -> Result<Channel> {
+    // SNI 用对方 node_id：rustls 校验对端 cert SAN 包含此 node_id，绑定 cert 到具体身份。
+    let tls = ctx.tls_client.clone().domain_name(peer_node_id);
     Ok(Endpoint::from_shared(format!("https://{addr}"))?
-        .tls_config(ctx.tls_client.clone())?
+        .tls_config(tls)?
         .connect()
         .await?)
 }
@@ -190,8 +196,8 @@ pub(crate) async fn connect_next(
             None => continue,
         };
         match try_open(
-            ctx, &addr, &rest, targets, target_strategy, client_ip, forward_id, hop_index + 1,
-            udp_src_addr,
+            ctx, node_id, &addr, &rest, targets, target_strategy, client_ip, forward_id,
+            hop_index + 1, udp_src_addr,
         )
         .await
         {
@@ -208,9 +214,10 @@ pub(crate) async fn connect_next(
     anyhow::bail!("hop {hop_index}: all candidates failed")
 }
 
-#[allow(deprecated)]
+#[allow(deprecated, clippy::too_many_arguments)]
 async fn try_open(
     ctx: &NodeCtx,
+    peer_node_id: &str,
     addr: &str,
     rest_hops: &[Hop],
     targets: &[TargetEndpoint],
@@ -220,7 +227,7 @@ async fn try_open(
     next_hop_index: u32,
     udp_src_addr: &str,
 ) -> Result<(Streaming<Chunk>, mpsc::Sender<Chunk>)> {
-    let channel = connect_dataplane(ctx, addr).await?;
+    let channel = connect_dataplane(ctx, peer_node_id, addr).await?;
     let mut client = DataPlaneClient::new(channel);
     let (req_tx, req_rx) = mpsc::channel::<Chunk>(64);
     // 兼容字段：填入 targets[0] 给可能存在的旧版本节点
