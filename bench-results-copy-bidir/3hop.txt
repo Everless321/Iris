@@ -1,0 +1,6 @@
+
+============ iris 3-hop (copy_bidir) ============
+--- TCP -P 1 (20s) ---
+bps=3.357211390277469 Gbps, retrans=0
+--- TCP -P 8 ---
+bps=5.40301216812029 Gbps
