@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
+use tower_http::compression::CompressionLayer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -75,6 +76,9 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(|| crate::web_assets::handler(None)))
         .route("/*path", get(crate::web_assets::handler))
         .with_state(state)
+        // gzip/br/deflate 压缩（按 Accept-Encoding 自动选）。1MB JS bundle 压成 ~250KB，
+        // 跨大区/限速出口下 web UI 首次加载 3-5x 提速。layer 在 with_state 后，作用全 router。
+        .layer(CompressionLayer::new())
 }
 
 fn now_ms() -> i64 {
