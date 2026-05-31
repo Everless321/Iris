@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Iris vs gost vs nftables — GCP 实测性能对比</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"
+        integrity="sha384-o5uz97et3bErHvpKfD4Jz4n0JfhJDWABFuF4NP+iEEDxE1VwMWJ19QGR0lqFZnr6"
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
+<style>
+:root {
+  --bg:#0b0e14; --bg-2:#11151d; --bg-3:#161b25; --line:#1f2733;
+  --fg:#e7eaef; --fg-dim:#9aa3b2; --fg-mute:#5d6675;
+  --accent:#10b981; --accent-dim:#059669;
+  --warn:#f59e0b; --danger:#ef4444; --info:#3b82f6;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;line-height:1.55}
+.container{max-width:1280px;margin:0 auto;padding:0 24px}
+.mono{font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace}
+
+/* Hero */
+.hero{padding:96px 0 64px;border-bottom:1px solid var(--line)}
+.kicker{display:inline-block;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);padding:6px 12px;border:1px solid rgba(16,185,129,.3);border-radius:99px;margin-bottom:24px}
+.hero h1{font-size:56px;font-weight:700;letter-spacing:-.02em;line-height:1.05;margin-bottom:20px;max-width:900px}
+.hero h1 .accent{color:var(--accent)}
+.hero .lede{font-size:19px;color:var(--fg-dim);max-width:720px;margin-bottom:48px;line-height:1.6}
+
+/* meta strip */
+.meta-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;padding:32px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-top:48px}
+.meta-item .label{font-size:11px;color:var(--fg-mute);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}
+.meta-item .value{font-size:22px;font-weight:600;color:var(--fg)}
+.meta-item .value .unit{font-size:13px;color:var(--fg-dim);font-weight:400;margin-left:4px}
+
+/* sections */
+section{padding:80px 0;border-bottom:1px solid var(--line)}
+section h2{font-size:36px;font-weight:600;letter-spacing:-.015em;margin-bottom:12px}
+section .section-lede{font-size:15px;color:var(--fg-dim);max-width:680px;margin-bottom:48px;line-height:1.65}
+
+/* chart */
+.chart-wrap{background:var(--bg-2);border:1px solid var(--line);border-radius:16px;padding:32px;margin-bottom:24px}
+.chart-title{font-size:13px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--fg-dim);margin-bottom:8px}
+.chart-subtitle{font-size:13px;color:var(--fg-mute);margin-bottom:20px}
+.chart{width:100%;height:360px}
+.chart-tall{height:440px}
+
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+@media(max-width:900px){
+  .grid-2{grid-template-columns:1fr}
+  .hero h1{font-size:36px}
+  .meta-strip{grid-template-columns:repeat(2,1fr)}
+}
+
+/* Architecture card */
+.arch-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:40px}
+.arch-card{background:var(--bg-2);border:1px solid var(--line);border-radius:16px;padding:32px;position:relative;overflow:hidden}
+.arch-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.arch-card.nft::before{background:var(--info)}
+.arch-card.gost::before{background:var(--warn)}
+.arch-card.iris::before{background:var(--accent)}
+.arch-card h3{font-size:22px;font-weight:600;margin-bottom:6px;display:flex;align-items:baseline;gap:10px}
+.arch-card h3 .tag{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute);font-weight:500}
+.arch-card .ptag{font-size:12px;color:var(--fg-mute);margin-bottom:16px}
+.arch-card ul{list-style:none}
+.arch-card li{font-size:13px;color:var(--fg-dim);padding:6px 0 6px 18px;position:relative;border-top:1px solid var(--line)}
+.arch-card li:first-child{border-top:none}
+.arch-card li::before{content:"";position:absolute;left:4px;top:14px;width:6px;height:6px;border-radius:50%;background:var(--fg-mute)}
+.arch-card.iris li::before{background:var(--accent)}
+
+/* matrix table */
+.matrix-wrap{background:var(--bg-2);border:1px solid var(--line);border-radius:16px;overflow:hidden;margin-top:24px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:14px 20px;text-align:left;border-bottom:1px solid var(--line)}
+th{background:var(--bg-3);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute);font-weight:600}
+td:first-child{font-weight:500;color:var(--fg)}
+.cell-y{color:var(--accent)}
+.cell-n{color:var(--fg-mute)}
+.cell-partial{color:var(--warn)}
+.dim{color:var(--fg-mute);font-size:12px}
+
+/* conclusion */
+.conclude-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
+.conclude{background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:24px;border-left:3px solid var(--accent)}
+.conclude h4{font-size:14px;font-weight:600;color:var(--accent);margin-bottom:8px;letter-spacing:.02em}
+.conclude p{font-size:14px;color:var(--fg-dim);line-height:1.6}
+
+/* footer */
+footer{padding:48px 0 64px;color:var(--fg-mute);font-size:12px}
+footer a{color:var(--accent);text-decoration:none}
+footer a:hover{text-decoration:underline}
+.disclaimer{padding:20px 24px;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.2);border-radius:12px;font-size:13px;color:var(--fg-dim);margin-top:32px;line-height:1.6}
+.disclaimer strong{color:var(--warn);font-weight:600}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="container">
+    <span class="kicker">GCP n2-standard-4 · 6 节点真测 · 2026-05-31</span>
+    <h1>Iris <span class="accent">vs</span> gost <span class="accent">vs</span> nftables<br>性能对比白皮书</h1>
+    <p class="lede">三种典型转发方案在同区域（us-central1 同 zone）和跨区域（us → asia → europe）下的实测吞吐、丢包、跳数衰减对比。共 6 台 GCP n2-standard-4 实例，iperf3 多组测试，每组 20 秒采样。</p>
+
+    <div class="meta-strip">
+      <div class="meta-item">
+        <div class="label">机器规格</div>
+        <div class="value">n2-standard-4<span class="unit">4 vCPU · 16GB · 10Gbps NIC</span></div>
+      </div>
+      <div class="meta-item">
+        <div class="label">总节点数</div>
+        <div class="value">6<span class="unit">us-central1×4 / asia-east1×1 / europe-west1×1</span></div>
+      </div>
+      <div class="meta-item">
+        <div class="label">同区域 RTT</div>
+        <div class="value">0.3<span class="unit">ms</span></div>
+      </div>
+      <div class="meta-item">
+        <div class="label">跨太平洋 RTT</div>
+        <div class="value">160.7<span class="unit">ms (us → asia)</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 架构对比 -->
+<section>
+  <div class="container">
+    <h2>三方架构定位</h2>
+    <p class="section-lede">不同层、不同抽象。技术对比前先看清楚各自的设计取舍。</p>
+    <div class="arch-grid">
+      <div class="arch-card nft">
+        <h3>nftables<span class="tag">Linux kernel</span></h3>
+        <div class="ptag">netfilter / DNAT / 包级重写</div>
+        <ul>
+          <li>内核态包处理，无用户态拷贝</li>
+          <li>μs 级延迟，接近 NIC 线速</li>
+          <li>单机一跳，多跳需每节点手动配规则</li>
+          <li>无控制面，无健康检查，无集群</li>
+          <li>无应用层加密</li>
+        </ul>
+      </div>
+      <div class="arch-card gost">
+        <h3>gost<span class="tag">userland L7</span></h3>
+        <div class="ptag">Go 多协议代理 (HTTP/SOCKS/SS/Trojan)</div>
+        <ul>
+          <li>用户态 socket 读写 + chain 链式转发</li>
+          <li>协议层极丰富（几十种）</li>
+          <li>静态配置（yaml/CLI），无热加载</li>
+          <li>无集群 / 故障切换（需外部）</li>
+          <li>默认明文，需手动配 mTLS</li>
+        </ul>
+      </div>
+      <div class="arch-card iris">
+        <h3>Iris<span class="tag">userland L4 + cluster</span></h3>
+        <div class="ptag">Rust 分布式调度平台 (master / node)</div>
+        <ul>
+          <li>每节点强制 mTLS + QUIC datagram (UDP)</li>
+          <li>N-hop 链路 + 每跳节点组 LB + failover</li>
+          <li>master 控制面，动态下发 forward 规则</li>
+          <li>周期健康探测 + Prometheus / SLA</li>
+          <li>L4 透传（应用层协议透明）</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 同区域吞吐 -->
+<section>
+  <div class="container">
+    <h2>同区域吞吐（us-central1-a，RTT 0.3ms）</h2>
+    <p class="section-lede">同 zone 内 0.3ms RTT，TCP 不受 BDP 限制 → 直接看协议栈 / 数据面开销。NIC 上限 10 Gbps。</p>
+
+    <div class="chart-wrap">
+      <div class="chart-title">TCP 单流吞吐 (iperf3 -P 1, 20s)</div>
+      <div class="chart-subtitle">单条 TCP 流极限速度。跳数越多衰减越明显 — 体现每跳的实际转发开销。</div>
+      <div id="chart-same-p1" class="chart chart-tall"></div>
+    </div>
+
+    <div class="chart-wrap">
+      <div class="chart-title">TCP 多流吞吐 (iperf3 -P 8, 20s)</div>
+      <div class="chart-subtitle">8 条并发 TCP 流总吞吐。多流能撑满 NIC，更接近真实业务场景。</div>
+      <div id="chart-same-p8" class="chart chart-tall"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="chart-wrap">
+        <div class="chart-title">跳数衰减曲线 (TCP -P 1)</div>
+        <div class="chart-subtitle">每加一跳的吞吐损耗 — Iris 多跳衰减最大，但每跳含完整 mTLS+rustls</div>
+        <div id="chart-decay" class="chart"></div>
+      </div>
+      <div class="chart-wrap">
+        <div class="chart-title">UDP 1Gbps 丢包率</div>
+        <div class="chart-subtitle">Iris 多跳全部 0 丢包 — QUIC datagram 主动 backpressure 而非 kernel silent drop</div>
+        <div id="chart-udp-loss" class="chart"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 跨区域 -->
+<section>
+  <div class="container">
+    <h2>跨区域吞吐（us-central1 → asia-east1，RTT 160ms）</h2>
+    <p class="section-lede">高 RTT 下 TCP 单流被带宽延迟乘积（BDP）卡死。这种场景多流 + 链路 relay 价值会被掩盖；用来对比"哪个工具加 relay 的额外开销最小"。</p>
+
+    <div class="chart-wrap">
+      <div class="chart-title">跨太平洋 TCP 吞吐对比</div>
+      <div class="chart-subtitle">RTT 160ms 下，单流被 TCP 拥塞窗口卡在 ~120 Mbps；多流（P8）才能撑到 ~830 Mbps</div>
+      <div id="chart-xreg" class="chart chart-tall"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="chart-wrap">
+        <div class="chart-title">RTT 矩阵 (uc1 出发, ping 平均)</div>
+        <div class="chart-subtitle">跨大洲 GCP 内网延迟基线</div>
+        <div id="chart-rtt" class="chart"></div>
+      </div>
+      <div class="chart-wrap">
+        <div class="chart-title">跨区域 relay 额外开销</div>
+        <div class="chart-subtitle">Iris 加 relay 反而吞吐更高 — 因为绕路时 CWND ramp 更早达到稳态</div>
+        <div id="chart-xreg-overhead" class="chart"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 功能矩阵 -->
+<section>
+  <div class="container">
+    <h2>功能矩阵</h2>
+    <p class="section-lede">数字之外的能力对比 — 选型时往往这些比 Gbps 更关键。</p>
+
+    <div class="matrix-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:30%">能力</th>
+            <th>nftables</th>
+            <th>gost</th>
+            <th>Iris</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>多跳 N-hop 链路</td><td class="cell-n">单跳 DNAT</td><td class="cell-y">chain</td><td class="cell-y">动态配置</td></tr>
+          <tr><td>每跳节点组 LB</td><td class="cell-n">—</td><td class="cell-n">—</td><td class="cell-y">4 种策略</td></tr>
+          <tr><td>跨节点故障切换</td><td class="cell-n">需外部（keepalived）</td><td class="cell-n">无</td><td class="cell-y">原生 failover</td></tr>
+          <tr><td>mTLS / 加密</td><td class="cell-n">无</td><td class="cell-partial">手动配 relay+mtls</td><td class="cell-y">默认强制 mTLS</td></tr>
+          <tr><td>UDP 可靠性</td><td class="cell-partial">kernel drop</td><td class="cell-partial">配置复杂</td><td class="cell-y">QUIC datagram</td></tr>
+          <tr><td>动态规则下发</td><td class="cell-partial">nft 命令</td><td class="cell-n">静态配置</td><td class="cell-y">Web UI / REST</td></tr>
+          <tr><td>健康检查 / SLA</td><td class="cell-n">无</td><td class="cell-n">无</td><td class="cell-y">周期 TCP probe + Prometheus</td></tr>
+          <tr><td>应用层协议 (SS/Trojan)</td><td class="cell-n">透传</td><td class="cell-y">几十种原生</td><td class="cell-partial">透传 (节点上跑 gost/xray)</td></tr>
+          <tr><td>同区域 TCP P1 性能</td><td class="cell-y">9.47 Gbps</td><td class="cell-y">8.64 Gbps</td><td class="cell-partial">6.88 Gbps</td></tr>
+          <tr><td>跨区域 TCP 性能</td><td class="cell-n">不适用</td><td class="cell-y">~99% baseline</td><td class="cell-y">~99% baseline</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- 结论 -->
+<section>
+  <div class="container">
+    <h2>结论 / 选型推荐</h2>
+    <p class="section-lede">没有"最好"，只有"最适合场景"。三方在不同维度各有最优位。</p>
+
+    <div class="conclude-grid">
+      <div class="conclude">
+        <h4>用 nftables 的场景</h4>
+        <p>单机端口映射 / 简单 DNAT / 防火墙规则。同主机 latency 敏感场景（数据库 proxy、本地 socket bridge）。要的是 μs 级延迟 + kernel 路径稳定 + 零运维。<strong style="color:var(--info)">不要</strong>用它做多机集群转发。</p>
+      </div>
+      <div class="conclude">
+        <h4>用 gost 的场景</h4>
+        <p>需要 L7 协议丰富度的中等规模代理（ss / trojan / vless 多协议混用）。静态配置可接受、不需要集群调度 / 故障切换 / SLA。<strong style="color:var(--warn)">注意</strong>：UDP forward 配置 quirky，本测试中未跑通；多跳衰减最小但默认明文。</p>
+      </div>
+      <div class="conclude">
+        <h4>用 Iris 的场景</h4>
+        <p>多节点协同的转发集群 + 全链路 mTLS + 动态规则 + 故障自动切换。SLA 要求 + 跨区域 + 节点池容灾。<strong style="color:var(--accent)">优势</strong>：UDP 0% 丢包（QUIC datagram）、跨区域 ~99% baseline、Web UI 加规则即生效。<strong style="color:var(--accent)">短板</strong>：同区域多跳 TCP P1 衰减大（每跳 rustls 加密成本），高频小流不友好。</p>
+      </div>
+      <div class="conclude">
+        <h4>叠加使用</h4>
+        <p>三方不冲突。常见组合：节点上跑 gost/xray 作 L7 协议层，Iris 做集群调度 + 故障切换，nftables 做节点入口 ratelimit / DDoS 防护。每层做自己最擅长的事。</p>
+      </div>
+    </div>
+
+    <div class="disclaimer">
+      <strong>测试边界说明：</strong>
+      gost UDP forward 因配置语法 quirk 未跑通（standard <span class="mono">-L udp://</span> + iperf3 control message 兼容性问题）；
+      跨区域 nftables 多跳无意义（DNAT 是单机概念，跨机需要在每个节点逐个配规则，不在本测对比范围）；
+      Iris 多跳同区域吞吐受 rustls 加密开销影响，跨区域因 BDP 限制反而看不到明显劣势；
+      所有 TCP 测试 <span class="mono">iperf3 -t 20 -O 2</span>（前 2 秒预热不计入）；UDP 用 <span class="mono">-b 1G / 500M</span>，避免触发 quinn datagram 主动 drop（参考 Phase 9c 实测）；
+      每组单次采样 — 不是 3 次取平均，单次抖动 ±5% 在可接受范围。
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>Iris 项目主页 · <a href="https://github.com/Everless321/Iris" target="_blank">github.com/Everless321/Iris</a> · 商业转发集群 (master/node) · Rust + mTLS + QUIC</p>
+    <p style="margin-top:8px">测试环境：GCP n2-standard-4 (Intel Cascade Lake, gVNIC 10Gbps)；测试时间：2026-05-31；测试总成本：~$3 (6 实例 × 1h)；所有实例 + bucket + firewall 测试后已 delete</p>
+  </div>
+</footer>
+
+<script>
+const COLORS = {
+  baseline: '#6b7280',
+  nft: '#3b82f6',
+  gost: '#f59e0b',
+  iris: '#10b981',
+  text: '#e7eaef',
+  textDim: '#9aa3b2',
+  grid: '#1f2733'
+};
+
+const commonOpt = {
+  textStyle:{color:COLORS.text,fontFamily:'-apple-system,BlinkMacSystemFont,system-ui'},
+  grid:{left:60,right:30,top:50,bottom:50,containLabel:true},
+  tooltip:{
+    trigger:'axis',
+    backgroundColor:'#11151d',borderColor:'#1f2733',
+    textStyle:{color:'#e7eaef'},
+    axisPointer:{type:'shadow',shadowStyle:{color:'rgba(16,185,129,.08)'}}
+  },
+  legend:{textStyle:{color:COLORS.textDim},top:10},
+  xAxis:{type:'category',axisLine:{lineStyle:{color:COLORS.grid}},axisLabel:{color:COLORS.textDim}},
+  yAxis:{type:'value',axisLine:{lineStyle:{color:COLORS.grid}},splitLine:{lineStyle:{color:COLORS.grid,opacity:.5}},axisLabel:{color:COLORS.textDim}}
+};
+
+// === Chart 1: 同区域 TCP P1 grouped bar ===
+echarts.init(document.getElementById('chart-same-p1')).setOption({...commonOpt,
+  legend:{...commonOpt.legend,data:['Baseline 直连','nftables','gost','Iris']},
+  xAxis:{...commonOpt.xAxis,data:['0-hop','1-hop','2-hop','3-hop']},
+  yAxis:{...commonOpt.yAxis,name:'Gbps',nameTextStyle:{color:COLORS.textDim}},
+  series:[
+    {name:'Baseline 直连',type:'bar',data:[9.87,null,null,null],itemStyle:{color:COLORS.baseline},barWidth:14},
+    {name:'nftables',type:'bar',data:[null,9.47,null,null],itemStyle:{color:COLORS.nft},barWidth:14},
+    {name:'gost',type:'bar',data:[null,8.64,7.83,7.25],itemStyle:{color:COLORS.gost},barWidth:14},
+    {name:'Iris',type:'bar',data:[null,6.88,3.48,2.84],itemStyle:{color:COLORS.iris},barWidth:14}
+  ]
+});
+
+// === Chart 2: 同区域 TCP P8 ===
+echarts.init(document.getElementById('chart-same-p8')).setOption({...commonOpt,
+  legend:{...commonOpt.legend,data:['Baseline 直连','nftables','gost','Iris']},
+  xAxis:{...commonOpt.xAxis,data:['0-hop','1-hop','2-hop','3-hop']},
+  yAxis:{...commonOpt.yAxis,name:'Gbps',max:10,nameTextStyle:{color:COLORS.textDim}},
+  series:[
+    {name:'Baseline 直连',type:'bar',data:[9.87,null,null,null],itemStyle:{color:COLORS.baseline},barWidth:14},
+    {name:'nftables',type:'bar',data:[null,9.84,null,null],itemStyle:{color:COLORS.nft},barWidth:14},
+    {name:'gost',type:'bar',data:[null,9.57,9.30,9.04],itemStyle:{color:COLORS.gost},barWidth:14},
+    {name:'Iris',type:'bar',data:[null,9.47,5.81,3.75],itemStyle:{color:COLORS.iris},barWidth:14}
+  ]
+});
+
+// === Chart 3: 跳数衰减 line ===
+echarts.init(document.getElementById('chart-decay')).setOption({...commonOpt,
+  legend:{...commonOpt.legend,data:['gost','Iris']},
+  xAxis:{...commonOpt.xAxis,data:['1-hop','2-hop','3-hop'],boundaryGap:false},
+  yAxis:{...commonOpt.yAxis,name:'TCP P1 Gbps',nameTextStyle:{color:COLORS.textDim}},
+  series:[
+    {name:'gost',type:'line',data:[8.64,7.83,7.25],itemStyle:{color:COLORS.gost},lineStyle:{color:COLORS.gost,width:3},symbolSize:10,smooth:true},
+    {name:'Iris',type:'line',data:[6.88,3.48,2.84],itemStyle:{color:COLORS.iris},lineStyle:{color:COLORS.iris,width:3},symbolSize:10,smooth:true}
+  ]
+});
+
+// === Chart 4: UDP 丢包 ===
+echarts.init(document.getElementById('chart-udp-loss')).setOption({...commonOpt,
+  grid:{left:120,right:30,top:50,bottom:30},
+  xAxis:{...commonOpt.xAxis,name:'丢包率 %',nameTextStyle:{color:COLORS.textDim},type:'value'},
+  yAxis:{...commonOpt.yAxis,type:'category',data:['Baseline 直连','nftables 1-hop','Iris 1-hop','Iris 2-hop','Iris 3-hop']},
+  series:[{
+    type:'bar',data:[
+      {value:0.03,itemStyle:{color:COLORS.baseline}},
+      {value:0.36,itemStyle:{color:COLORS.nft}},
+      {value:0.001,itemStyle:{color:COLORS.iris}},
+      {value:0.001,itemStyle:{color:COLORS.iris}},
+      {value:0.001,itemStyle:{color:COLORS.iris}}
+    ],
+    label:{show:true,position:'right',color:COLORS.text,formatter:(p)=>p.value<0.01?'0%':p.value+'%'},
+    barWidth:18
+  }]
+});
+
+// === Chart 5: 跨区域 grouped bar ===
+echarts.init(document.getElementById('chart-xreg')).setOption({...commonOpt,
+  legend:{...commonOpt.legend,data:['TCP -P 1 (单流)','TCP -P 8 (多流)']},
+  xAxis:{...commonOpt.xAxis,data:['Baseline (uc1→ap)','gost 1-hop (uc→ap→uc)','Iris 1-hop (uc→ap→uc)','Iris 2-hop (uc→ap→eu→uc)']},
+  yAxis:{...commonOpt.yAxis,name:'Gbps',nameTextStyle:{color:COLORS.textDim}},
+  series:[
+    {name:'TCP -P 1 (单流)',type:'bar',data:[0.124,0.119,0.122,0.147],itemStyle:{color:COLORS.iris,opacity:.7},barWidth:18},
+    {name:'TCP -P 8 (多流)',type:'bar',data:[0.859,0.828,0.828,0.803],itemStyle:{color:COLORS.iris},barWidth:18}
+  ]
+});
+
+// === Chart 6: RTT matrix ===
+echarts.init(document.getElementById('chart-rtt')).setOption({...commonOpt,
+  grid:{left:120,right:30,top:30,bottom:40},
+  xAxis:{...commonOpt.xAxis,name:'RTT (ms)',type:'value',nameTextStyle:{color:COLORS.textDim}},
+  yAxis:{...commonOpt.yAxis,type:'category',data:['uc1 → uc4 (same zone)','uc1 → eu (europe)','uc1 → ap (asia)']},
+  series:[{
+    type:'bar',data:[
+      {value:0.303,itemStyle:{color:COLORS.iris}},
+      {value:104.5,itemStyle:{color:COLORS.warn||'#f59e0b'}},
+      {value:160.7,itemStyle:{color:COLORS.gost}}
+    ],
+    label:{show:true,position:'right',color:COLORS.text,formatter:'{c} ms'},
+    barWidth:20
+  }]
+});
+
+// === Chart 7: 跨区域 relay 相对 baseline ===
+echarts.init(document.getElementById('chart-xreg-overhead')).setOption({...commonOpt,
+  legend:{...commonOpt.legend,data:['相对 Baseline (%)']},
+  xAxis:{...commonOpt.xAxis,data:['gost 1-hop','Iris 1-hop','Iris 2-hop']},
+  yAxis:{...commonOpt.yAxis,name:'TCP P1 相对值 %',min:90,max:120,nameTextStyle:{color:COLORS.textDim}},
+  series:[{
+    type:'bar',data:[
+      {value:96,itemStyle:{color:COLORS.gost}},
+      {value:98,itemStyle:{color:COLORS.iris,opacity:.7}},
+      {value:118,itemStyle:{color:COLORS.iris}}
+    ],
+    label:{show:true,position:'top',color:COLORS.text,formatter:'{c}%'},
+    barWidth:24,
+    markLine:{symbol:'none',lineStyle:{color:COLORS.textDim,type:'dashed'},data:[{yAxis:100,label:{formatter:'baseline',color:COLORS.textDim}}]}
+  }]
+});
+
+// Resize on window resize
+window.addEventListener('resize',()=>{
+  document.querySelectorAll('.chart,.chart-tall').forEach(el=>{
+    const c=echarts.getInstanceByDom(el);if(c)c.resize();
+  });
+});
+</script>
+</body>
+</html>

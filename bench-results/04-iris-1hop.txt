@@ -1,0 +1,11 @@
+
+============ iris 1-hop ============
+forward created
+all iris-node restarted; wait 8s for sync_config + listener
+uc2:18388 LISTEN
+--- TCP -P 1 ---
+bps=6.882525516489835 Gbps, retrans=0
+--- TCP -P 8 ---
+bps=9.475188668333367 Gbps
+--- UDP -b 500M ---
+bps=0.4999782118882418 Gbps, lost=0%
