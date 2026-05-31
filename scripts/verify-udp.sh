@@ -42,7 +42,7 @@ AUTH="Authorization: Bearer $TOKEN"
 echo "    token: ${TOKEN:0:32}..."
 
 echo "==> [4/7] 注册 + enroll 节点 a/b/c"
-PORT_A=7444; PORT_B=7445; PORT_C=7446
+PORT_A=7444; PORT_B=7446; PORT_C=7448
 for entry in "a:entry:$PORT_A" "b:relay:$PORT_B" "c:exit:$PORT_C"; do
     id=$(echo $entry | cut -d: -f1)
     name=$(echo $entry | cut -d: -f2)

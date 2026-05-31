@@ -1,6 +1,7 @@
 mod dataplane;
 mod forward;
 mod lb;
+mod raw_tunnel;
 mod sock;
 mod udp_forward;
 
@@ -59,11 +60,12 @@ async fn main() -> Result<()> {
         tracing::info!("waiting for certs...");
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    let ca = Certificate::from_pem(std::fs::read(p("ca.pem"))?);
-    let identity = Identity::from_pem(
-        std::fs::read(p("client.pem"))?,
-        std::fs::read(p("client-key.pem"))?,
-    );
+    let ca_pem = std::fs::read(p("ca.pem"))?;
+    let cert_pem = std::fs::read(p("client.pem"))?;
+    let key_pem = std::fs::read(p("client-key.pem"))?;
+    // tonic 用（保持 gRPC 数据面 + 控制面兼容）
+    let ca = Certificate::from_pem(&ca_pem);
+    let identity = Identity::from_pem(&cert_pem, &key_pem);
     let tls_client = ClientTlsConfig::new()
         .ca_certificate(ca.clone())
         .identity(identity.clone())
@@ -71,6 +73,11 @@ async fn main() -> Result<()> {
     let dp_tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(ca);
+    // raw_tunnel 用（rustls 原生，bypass HTTP/2 framing）
+    let (raw_server_cfg, raw_client_cfg) =
+        raw_tunnel::build_configs(&ca_pem, &cert_pem, &key_pem)?;
+    let raw_acceptor = tokio_rustls::TlsAcceptor::from(raw_server_cfg);
+    let raw_connector = tokio_rustls::TlsConnector::from(raw_client_cfg);
 
     // 连 master（重试直到就绪）
     let channel = loop {
@@ -97,6 +104,7 @@ async fn main() -> Result<()> {
     let ctx = Arc::new(NodeCtx {
         nodes: RwLock::new(build_nodes(&reply.nodes)),
         tls_client,
+        raw_connector: raw_connector.clone(),
     });
 
     // LB 由 DataPlane server 与入口共享（中转节点也需 LB 选下一跳）
@@ -105,10 +113,10 @@ async fn main() -> Result<()> {
     // 出口 target 路由（按 forward_id 维护加权 RR 游标）
     let target_router = Arc::new(dataplane::TargetRouter::new());
 
-    // 起 DataPlane 隧道服务（被上一跳连接）
+    // gRPC 数据面服务（端口 7444，被 master ProbeReach 调用 + raw 不可用时的 fallback）
+    let dp_addr: SocketAddr = data_addr.parse()?;
     {
         let (ctx, lb, target_router) = (ctx.clone(), lb.clone(), target_router.clone());
-        let dp_addr: SocketAddr = data_addr.parse()?;
         tokio::spawn(async move {
             let svc = DataPlaneSvc { ctx, lb, target_router };
             if let Err(e) = Server::builder()
@@ -121,7 +129,22 @@ async fn main() -> Result<()> {
                 tracing::error!(error = %e, "dataplane server exited");
             }
         });
-        tracing::info!(%data_addr, "dataplane listening (mTLS)");
+        tracing::info!(%data_addr, "dataplane listening (mTLS, gRPC)");
+    }
+
+    // raw_tunnel 数据面服务（端口 = grpc + 1，bypass HTTP/2 framing；Phase 9a）
+    let raw_addr = SocketAddr::new(dp_addr.ip(), dp_addr.port() + 1);
+    {
+        let (ctx, lb, target_router) = (ctx.clone(), lb.clone(), target_router.clone());
+        let acceptor = raw_acceptor.clone();
+        let connector = raw_connector.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                raw_tunnel::serve(raw_addr, acceptor, connector, ctx, lb, target_router).await
+            {
+                tracing::error!(error = %e, "raw_tunnel server exited");
+            }
+        });
     }
 
     // 启动入口监听器（本节点出现在某转发的第一跳节点组中）

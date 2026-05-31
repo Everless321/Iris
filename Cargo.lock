@@ -3424,8 +3424,12 @@ name = "zhuanfa-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "prost",
+ "rustls",
+ "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tracing",
