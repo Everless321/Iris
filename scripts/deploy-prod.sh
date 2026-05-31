@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# 滚动部署 musl binary 到 master + N nodes。先全停再启，避免新老 proto 混跑。
+# 滚动部署 musl binary 到 master + N nodes。先推 file → restart，避免 stop 失败 → start no-op。
 # 用法：
 #   scripts/deploy-prod.sh <dir-containing-zhuanfa-master-and-node>
 #
-# 主机清单从 $ZF_DEPLOY_HOSTS_FILE 读取（默认 ~/.zhuanfa/hosts.conf）。
-# 文件格式：每行 `name:ip:port:password:roles`，roles ∈ {master_node, node}。
-# 该文件含密码，**严禁入库**——脚本本身不含任何凭证。
+# 认证：ed25519 key + 持久化 known_hosts（accept-new）。Task #17 后切到 key-only。
+# 节点 sshd 需启用 PubkeyAuthentication=yes（rfchost 用 sshd_config.d/99-zfdeploy.conf）。
+#
+# 主机清单 $ZF_DEPLOY_HOSTS_FILE（默认 ~/.zhuanfa/hosts.conf），每行：
+#   name:ip:port:roles      roles ∈ {master_node, node}
+# （历史 5 字段含 password 的格式仍兼容：第 4 字段被忽略，roles 取第 5 字段）
+#
+# 凭证文件夹（$HOME/.zhuanfa/）由用户自管，不入库：
+#   keys/zfdeploy{,.pub}    — ssh-keygen -t ed25519 -f keys/zfdeploy -N ""
+#   known_hosts             — 首次 connect 自动写入（accept-new）
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,66 +21,55 @@ MASTER_BIN="$BIN_DIR/zhuanfa-master"
 NODE_BIN="$BIN_DIR/zhuanfa-node"
 [ -f "$MASTER_BIN" ] || { echo "缺 $MASTER_BIN"; exit 1; }
 [ -f "$NODE_BIN" ]   || { echo "缺 $NODE_BIN"; exit 1; }
-command -v sshpass >/dev/null || { echo "需要 sshpass: brew install sshpass"; exit 1; }
 
 HOSTS_FILE=${ZF_DEPLOY_HOSTS_FILE:-$HOME/.zhuanfa/hosts.conf}
-if [ ! -f "$HOSTS_FILE" ]; then
-    cat <<EOF
-缺主机清单：$HOSTS_FILE
+KEY=${ZF_DEPLOY_KEY:-$HOME/.zhuanfa/keys/zfdeploy}
+KH=${ZF_DEPLOY_KNOWN_HOSTS:-$HOME/.zhuanfa/known_hosts}
 
-示例内容（每行一台主机，# 开头为注释）：
-  nosla-hk:MASTER_IP_REDACTED:22:<password>:master_node
-  rfchost-172:NODE_RFCHOST_REDACTED:22:<password>:node
+[ -f "$HOSTS_FILE" ] || { echo "缺主机清单：$HOSTS_FILE"; exit 1; }
+[ -f "$KEY" ] || { echo "缺 SSH 私钥：$KEY (用 ssh-keygen -t ed25519 -f $KEY -N '')"; exit 1; }
+mkdir -p "$(dirname "$KH")" && touch "$KH" && chmod 600 "$KH"
 
-把文件权限设成 600，避免泄露：
-  mkdir -p ~/.zhuanfa && chmod 700 ~/.zhuanfa
-  chmod 600 ~/.zhuanfa/hosts.conf
-EOF
-    exit 1
-fi
-perm=$(stat -f '%Lp' "$HOSTS_FILE" 2>/dev/null || stat -c '%a' "$HOSTS_FILE" 2>/dev/null)
-if [ "$perm" != "600" ] && [ "$perm" != "400" ]; then
-    echo "⚠️  $HOSTS_FILE 权限是 $perm，建议 chmod 600（含明文密码）"
-fi
-
-PASS_DIR=$(mktemp -d)
-trap "rm -rf '$PASS_DIR'" EXIT
-chmod 700 "$PASS_DIR"
-
-# 平行数组（兼容 bash 3.2，macOS 默认 /bin/bash）
-NAMES=(); IPS=(); PORTS=(); PASSFILES=(); ROLES=()
+# 平行数组（兼容 bash 3.2）
+NAMES=(); IPS=(); PORTS=(); ROLES=()
 MASTER_INDEX=-1
 
 while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; esac
-    IFS=: read -r _n _i _p _w _r <<< "$line"
-    [ -z "${_n:-}" ] && continue
-    f="$PASS_DIR/$_n"
-    printf '%s' "$_w" > "$f"
-    chmod 600 "$f"
-    NAMES+=("$_n"); IPS+=("$_i"); PORTS+=("$_p"); PASSFILES+=("$f"); ROLES+=("$_r")
-    if [ "$_r" = "master_node" ]; then
-        MASTER_INDEX=$((${#NAMES[@]} - 1))
+    # 兼容 4 字段 (name:ip:port:roles) 和 5 字段 (name:ip:port:password:roles)
+    fields=()
+    IFS=: read -ra fields <<< "$line"
+    [ ${#fields[@]} -lt 4 ] && continue
+    name=${fields[0]}; ip=${fields[1]}; port=${fields[2]}
+    if [ ${#fields[@]} -ge 5 ]; then
+        roles=${fields[4]}   # 5 字段：跳过 password
+    else
+        roles=${fields[3]}
     fi
+    NAMES+=("$name"); IPS+=("$ip"); PORTS+=("$port"); ROLES+=("$roles")
+    [ "$roles" = "master_node" ] && MASTER_INDEX=$((${#NAMES[@]} - 1))
 done < "$HOSTS_FILE"
 
 N=${#NAMES[@]}
 [ $N -gt 0 ] || { echo "$HOSTS_FILE 没有有效条目"; exit 1; }
 [ $MASTER_INDEX -ge 0 ] || { echo "$HOSTS_FILE 未指定 roles=master_node 的主机"; exit 1; }
-echo "==> 读取 $N 台主机；master = ${NAMES[$MASTER_INDEX]}"
+echo "==> 读取 $N 台主机；master = ${NAMES[$MASTER_INDEX]}（auth: ed25519 key + known_hosts pinning）"
 
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o ConnectTimeout=10 -o ServerAliveInterval=5
-          -o PreferredAuthentications=password -o PubkeyAuthentication=no
-          -o NumberOfPasswordPrompts=1)
+# /usr/bin/ssh 绕过本机 shell wrapper（zsh 等）
+SSH_BIN=/usr/bin/ssh
+SCP_BIN=/usr/bin/scp
+SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes
+          -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KH"
+          -o PasswordAuthentication=no -o PubkeyAuthentication=yes
+          -o ConnectTimeout=10 -o ServerAliveInterval=5)
 
 ssh_run() {
     local i=$1; shift
-    sshpass -f "${PASSFILES[$i]}" ssh "${SSH_OPTS[@]}" -p "${PORTS[$i]}" "root@${IPS[$i]}" "$@"
+    "$SSH_BIN" "${SSH_OPTS[@]}" -p "${PORTS[$i]}" "root@${IPS[$i]}" "$@"
 }
 scp_to() {
     local i=$1 src=$2 dst=$3
-    sshpass -f "${PASSFILES[$i]}" scp -O "${SSH_OPTS[@]}" -P "${PORTS[$i]}" "$src" "root@${IPS[$i]}:$dst"
+    "$SCP_BIN" -O "${SSH_OPTS[@]}" -P "${PORTS[$i]}" "$src" "root@${IPS[$i]}:$dst"
 }
 
 run_all() {
@@ -84,7 +80,7 @@ run_all() {
     wait
 }
 
-echo "==> [1/4] 推 node binary 到所有节点（替换 file，老进程仍跑老 fd）"
+echo "==> [1/4] 推 node binary 到所有节点"
 for ((i=0; i<N; i++)); do
     echo "    [${NAMES[$i]}] scp zhuanfa-node"
     scp_to "$i" "$NODE_BIN" "/opt/zhuanfa/zhuanfa-node.new"
@@ -96,7 +92,6 @@ scp_to "$MASTER_INDEX" "$MASTER_BIN" "/opt/zhuanfa/zhuanfa-master.new"
 ssh_run "$MASTER_INDEX" "chmod +x /opt/zhuanfa/zhuanfa-master.new && mv -f /opt/zhuanfa/zhuanfa-master.new /opt/zhuanfa/zhuanfa-master && md5sum /opt/zhuanfa/zhuanfa-master | awk '{print \$1}'"
 
 echo "==> [3/4] restart zhuanfa-master @ ${NAMES[$MASTER_INDEX]} + 等 7080 ready"
-# restart 不论老进程活着没都重启，避免 stop 失败 → start no-op 的坑
 ssh_run "$MASTER_INDEX" "systemctl restart zhuanfa-master && sleep 3 && curl -fsS http://127.0.0.1:7080/healthz"
 
 echo "==> [4/4] restart 所有 zhuanfa-node + 校验跑的是新 binary"
@@ -104,9 +99,8 @@ NODE_MD5=$(md5 -q "$NODE_BIN" 2>/dev/null || md5sum "$NODE_BIN" | awk '{print $1
 echo "    expected node md5: $NODE_MD5"
 for ((i=0; i<N; i++)); do
     name=${NAMES[$i]}
-    # 最多 3 次重试（rfchost fail2ban 偶发）
     for attempt in 1 2 3; do
-        out=$(ssh_run "$i" "systemctl restart zhuanfa-node && sleep 3 && pid=\$(pgrep -x zhuanfa-node | head -1) && md5sum /proc/\$pid/exe | awk '{print \$1}'" 2>&1 | grep -v Warning | tail -1)
+        out=$(ssh_run "$i" "systemctl restart zhuanfa-node && sleep 3 && pid=\$(pgrep -x zhuanfa-node | head -1) && md5sum /proc/\$pid/exe | awk '{print \$1}'" 2>&1 | tail -1)
         if [ "$out" = "$NODE_MD5" ]; then
             echo "    ✅ $name → $out"
             break
@@ -117,8 +111,8 @@ for ((i=0; i<N; i++)); do
 done
 
 echo
-echo "==> 烟测：master 看节点心跳（15s 内）"
+echo "==> 烟测：master 看节点心跳"
 sleep 8
-ssh_run "$MASTER_INDEX" "journalctl -u zhuanfa-master --since '15 sec ago' --no-pager | grep heartbeat | awk '{print \$NF}' | sort -u | head"
+ssh_run "$MASTER_INDEX" "journalctl -u zhuanfa-master --since '15 sec ago' --no-pager | grep -oE 'heartbeat node=\S+' | sort -u"
 
 echo "✅ 部署完成"
