@@ -51,11 +51,22 @@ struct ActiveForward {
 
 - [x] cargo check --workspace 通过
 - [x] cargo test --workspace 通过（11/11 lb tests）
-- [ ] GitHub Actions musl build
-- [ ] prod 4 节点部署
-- [ ] 5 场景手动验证
-- [ ] commit final
+- [x] GitHub Actions musl build (run 26710296077)
+- [x] prod 4 节点部署 (commit 24d5c1e)
+- [x] 5 场景手动验证 **5/5 全 PASS**
 
 ## 最终结果
 
-填写于部署 + 验证完毕后。
+```
+=== 场景 1: 新增 forward → 5s 内 listener 出现 ===  ✅ LISTEN
+=== 场景 2: 删除 forward → 5s 内 listener 消失 ===  ✅ MISSING
+=== 场景 3: 改 listen_port → 老消失新出现       ===  ✅ MISSING / LISTEN
+=== 场景 4: 把节点从 hops[0] 移走 → listener 消失 === ✅ MISSING
+=== 场景 5: 再加回 hops[0] → listener 重新出现   === ✅ LISTEN
+```
+
+热加载机制按设计工作：
+- 5s sync_config 周期内完成 listener 启停
+- SO_REUSEADDR 让 port 立即可用，未触发 EADDRINUSE
+- ForwardRule 字段比较精确识别"完全不变"vs"任何字段变化"
+- 不影响心跳 / 现有 forward / 数据面
