@@ -25,8 +25,10 @@ jobs:
 
       - name: Build web
         working-directory: web
+        # --include=optional：rollup 把 linux-x64-gnu 等放 optionalDependencies，
+        # lock 文件含 macOS arm64 时 npm ci 不会装其它平台，需显式拉。
         run: |
-          npm install --no-audit --no-fund
+          npm ci --include=optional --no-audit --no-fund
           npm run build
 
       - name: Install musl tools
