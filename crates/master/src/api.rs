@@ -12,8 +12,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::transport::{ClientTlsConfig, Endpoint};
-use zhuanfa_proto::control::data_plane_client::DataPlaneClient;
-use zhuanfa_proto::control::ProbeReachRequest;
+use iris_proto::control::data_plane_client::DataPlaneClient;
+use iris_proto::control::ProbeReachRequest;
 
 use crate::auth::{hash_password, issue_token, verify_password, AdminClaims, AuthState, Claims};
 use crate::models::{
@@ -442,8 +442,8 @@ async fn enroll_node(
     Json(r): Json<EnrollRequest>,
 ) -> Result<Json<EnrollResponse>, ApiErr> {
     // 安全：生产部署应强制 HTTPS（CA 私钥不应走明文链路）。
-    // ZF_REQUIRE_TLS=1 开启后，非 https 请求一律拒绝。
-    if std::env::var("ZF_REQUIRE_TLS").as_deref() == Ok("1") {
+    // IRIS_REQUIRE_TLS=1 开启后，非 https 请求一律拒绝。
+    if std::env::var("IRIS_REQUIRE_TLS").as_deref() == Ok("1") {
         let xfp = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok());
         if xfp != Some("https") {
             return Err((
@@ -468,7 +468,7 @@ async fn enroll_node(
         .bind(&r.token).fetch_one(&s.pool).await.map_err(err)?;
     // 签发节点专属证书
     let (cert_pem, key_pem, ca_pem) =
-        zhuanfa_common::sign_node_cert(&s.cert_dir, &node_id).map_err(err)?;
+        iris_common::sign_node_cert(&s.cert_dir, &node_id).map_err(err)?;
     // 数据面端口提示
     let addr: Option<String> = sqlx::query_scalar("SELECT addr FROM nodes WHERE id=?")
         .bind(&node_id).fetch_optional(&s.pool).await.map_err(err)?;
@@ -480,7 +480,7 @@ async fn enroll_node(
     Ok(Json(EnrollResponse {
         node_id,
         ca_pem, cert_pem, key_pem,
-        master_grpc: std::env::var("ZF_PUBLIC_GRPC").unwrap_or_else(|_| "https://127.0.0.1:7443".into()),
+        master_grpc: std::env::var("IRIS_PUBLIC_GRPC").unwrap_or_else(|_| "https://127.0.0.1:7443".into()),
         data_addr_hint,
     }))
 }
@@ -488,7 +488,7 @@ async fn enroll_node(
 /// 安装脚本（公开端点）。生产强制 HTTPS 同 enroll 端点。
 async fn install_script(headers: axum::http::HeaderMap) -> axum::response::Response {
     use axum::response::IntoResponse;
-    if std::env::var("ZF_REQUIRE_TLS").as_deref() == Ok("1") {
+    if std::env::var("IRIS_REQUIRE_TLS").as_deref() == Ok("1") {
         let xfp = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok());
         if xfp != Some("https") {
             return (StatusCode::FORBIDDEN, "请使用 HTTPS 访问 /install.sh").into_response();
@@ -556,31 +556,31 @@ async fn metrics(State(s): State<AppState>) -> Result<String, ApiErr> {
     let nodes = sqlx::query_as::<_, Node>("SELECT * FROM nodes ORDER BY id")
         .fetch_all(&s.pool).await.map_err(err)?;
     let mut o = String::new();
-    o.push_str("# HELP zhuanfa_node_up 节点是否健康(1/0)\n# TYPE zhuanfa_node_up gauge\n");
+    o.push_str("# HELP iris_node_up 节点是否健康(1/0)\n# TYPE iris_node_up gauge\n");
     for n in &nodes {
-        o.push_str(&format!("zhuanfa_node_up{{node=\"{}\"}} {}\n",
+        o.push_str(&format!("iris_node_up{{node=\"{}\"}} {}\n",
             esc(&n.id), if n.health == "healthy" { 1 } else { 0 }));
     }
-    o.push_str("# HELP zhuanfa_node_latency_ms 最近探测RTT\n# TYPE zhuanfa_node_latency_ms gauge\n");
+    o.push_str("# HELP iris_node_latency_ms 最近探测RTT\n# TYPE iris_node_latency_ms gauge\n");
     for n in &nodes {
-        o.push_str(&format!("zhuanfa_node_latency_ms{{node=\"{}\"}} {}\n",
+        o.push_str(&format!("iris_node_latency_ms{{node=\"{}\"}} {}\n",
             esc(&n.id), n.latency_ms.unwrap_or(0)));
     }
-    o.push_str("# HELP zhuanfa_node_uptime_ratio 探测可用率\n# TYPE zhuanfa_node_uptime_ratio gauge\n");
+    o.push_str("# HELP iris_node_uptime_ratio 探测可用率\n# TYPE iris_node_uptime_ratio gauge\n");
     for n in &nodes {
-        o.push_str(&format!("zhuanfa_node_uptime_ratio{{node=\"{}\"}} {:.4}\n", esc(&n.id), uptime(n)));
+        o.push_str(&format!("iris_node_uptime_ratio{{node=\"{}\"}} {:.4}\n", esc(&n.id), uptime(n)));
     }
-    o.push_str("# HELP zhuanfa_node_fail_events 故障事件次数\n# TYPE zhuanfa_node_fail_events counter\n");
+    o.push_str("# HELP iris_node_fail_events 故障事件次数\n# TYPE iris_node_fail_events counter\n");
     for n in &nodes {
-        o.push_str(&format!("zhuanfa_node_fail_events{{node=\"{}\"}} {}\n", esc(&n.id), n.fail_events));
+        o.push_str(&format!("iris_node_fail_events{{node=\"{}\"}} {}\n", esc(&n.id), n.fail_events));
     }
-    o.push_str("# HELP zhuanfa_node_downtime_ms 累计不可用时长\n# TYPE zhuanfa_node_downtime_ms counter\n");
+    o.push_str("# HELP iris_node_downtime_ms 累计不可用时长\n# TYPE iris_node_downtime_ms counter\n");
     for n in &nodes {
-        o.push_str(&format!("zhuanfa_node_downtime_ms{{node=\"{}\"}} {}\n", esc(&n.id), n.downtime_ms));
+        o.push_str(&format!("iris_node_downtime_ms{{node=\"{}\"}} {}\n", esc(&n.id), n.downtime_ms));
     }
     let online = nodes.iter().filter(|n| n.health == "healthy").count();
-    o.push_str(&format!("# HELP zhuanfa_nodes_online 在线节点数\n# TYPE zhuanfa_nodes_online gauge\nzhuanfa_nodes_online {online}\n"));
-    o.push_str(&format!("# HELP zhuanfa_nodes_total 节点总数\n# TYPE zhuanfa_nodes_total gauge\nzhuanfa_nodes_total {}\n", nodes.len()));
+    o.push_str(&format!("# HELP iris_nodes_online 在线节点数\n# TYPE iris_nodes_online gauge\niris_nodes_online {online}\n"));
+    o.push_str(&format!("# HELP iris_nodes_total 节点总数\n# TYPE iris_nodes_total gauge\niris_nodes_total {}\n", nodes.len()));
     Ok(o)
 }
 
@@ -611,7 +611,7 @@ pub struct TestResponse {
 
 /// 安全校验：拒绝 target 解析到回环/内网/链路本地/多播/广播/未指定 等地址，
 /// 防止认证用户用本端点把节点群当端口扫描器去扫主控/节点本机或它们所处的内网。
-/// 设置 `ZF_ALLOW_PRIVATE_TARGETS=1` 可在开发环境放行。
+/// 设置 `IRIS_ALLOW_PRIVATE_TARGETS=1` 可在开发环境放行。
 ///
 /// 返回 pinned 的 `ip:port` 字符串：调用方应把这个值发给 node，避免 node 端二次
 /// DNS 解析时被 DNS rebinding 切到内网地址（TOCTOU）。
@@ -623,7 +623,7 @@ async fn check_external_target(addr: &str) -> Result<String, ApiErr> {
     if resolved.is_empty() {
         return Err(bad("无法解析目标地址"));
     }
-    let allow_private = std::env::var("ZF_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1");
+    let allow_private = std::env::var("IRIS_ALLOW_PRIVATE_TARGETS").as_deref() == Ok("1");
     if !allow_private {
         for sa in &resolved {
             if is_disallowed_ip(&sa.ip()) {

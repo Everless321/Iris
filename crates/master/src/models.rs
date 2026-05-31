@@ -306,7 +306,7 @@ pub struct EnrollResponse {
     pub cert_pem: String,
     pub key_pem: String,
     pub master_grpc: String,   // 节点该连的 master 控制面地址 host:port
-    pub data_addr_hint: String, // 推荐节点的 ZF_DATA_ADDR
+    pub data_addr_hint: String, // 推荐节点的 IRIS_DATA_ADDR
 }
 
 #[derive(Debug, Serialize, FromRow)]

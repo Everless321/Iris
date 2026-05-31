@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 # 滚动部署 musl binary 到 master + N nodes。先推 file → restart，避免 stop 失败 → start no-op。
 # 用法：
-#   scripts/deploy-prod.sh <dir-containing-zhuanfa-master-and-node>
+#   scripts/deploy-prod.sh <dir-containing-iris-master-and-node>
 #
 # 认证：ed25519 key + 持久化 known_hosts（accept-new）。Task #17 后切到 key-only。
 # 节点 sshd 需启用 PubkeyAuthentication=yes（rfchost 用 sshd_config.d/99-zfdeploy.conf）。
 #
-# 主机清单 $ZF_DEPLOY_HOSTS_FILE（默认 ~/.zhuanfa/hosts.conf），每行：
+# 主机清单 $IRIS_DEPLOY_HOSTS_FILE（默认 ~/.iris/hosts.conf），每行：
 #   name:ip:port:roles      roles ∈ {master_node, node}
 # （历史 5 字段含 password 的格式仍兼容：第 4 字段被忽略，roles 取第 5 字段）
 #
-# 凭证文件夹（$HOME/.zhuanfa/）由用户自管，不入库：
+# 凭证文件夹（$HOME/.iris/）由用户自管，不入库：
 #   keys/zfdeploy{,.pub}    — ssh-keygen -t ed25519 -f keys/zfdeploy -N ""
 #   known_hosts             — 首次 connect 自动写入（accept-new）
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BIN_DIR=${1:-./artifact}
-MASTER_BIN="$BIN_DIR/zhuanfa-master"
-NODE_BIN="$BIN_DIR/zhuanfa-node"
+MASTER_BIN="$BIN_DIR/iris-master"
+NODE_BIN="$BIN_DIR/iris-node"
 [ -f "$MASTER_BIN" ] || { echo "缺 $MASTER_BIN"; exit 1; }
 [ -f "$NODE_BIN" ]   || { echo "缺 $NODE_BIN"; exit 1; }
 
-HOSTS_FILE=${ZF_DEPLOY_HOSTS_FILE:-$HOME/.zhuanfa/hosts.conf}
-KEY=${ZF_DEPLOY_KEY:-$HOME/.zhuanfa/keys/zfdeploy}
-KH=${ZF_DEPLOY_KNOWN_HOSTS:-$HOME/.zhuanfa/known_hosts}
+HOSTS_FILE=${IRIS_DEPLOY_HOSTS_FILE:-$HOME/.iris/hosts.conf}
+KEY=${IRIS_DEPLOY_KEY:-$HOME/.iris/keys/zfdeploy}
+KH=${IRIS_DEPLOY_KNOWN_HOSTS:-$HOME/.iris/known_hosts}
 
 [ -f "$HOSTS_FILE" ] || { echo "缺主机清单：$HOSTS_FILE"; exit 1; }
 [ -f "$KEY" ] || { echo "缺 SSH 私钥：$KEY (用 ssh-keygen -t ed25519 -f $KEY -N '')"; exit 1; }
@@ -82,25 +82,25 @@ run_all() {
 
 echo "==> [1/4] 推 node binary 到所有节点"
 for ((i=0; i<N; i++)); do
-    echo "    [${NAMES[$i]}] scp zhuanfa-node"
-    scp_to "$i" "$NODE_BIN" "/opt/zhuanfa/zhuanfa-node.new"
-    ssh_run "$i" "chmod +x /opt/zhuanfa/zhuanfa-node.new && mv -f /opt/zhuanfa/zhuanfa-node.new /opt/zhuanfa/zhuanfa-node && md5sum /opt/zhuanfa/zhuanfa-node | awk '{print \$1}'"
+    echo "    [${NAMES[$i]}] scp iris-node"
+    scp_to "$i" "$NODE_BIN" "/opt/iris/iris-node.new"
+    ssh_run "$i" "chmod +x /opt/iris/iris-node.new && mv -f /opt/iris/iris-node.new /opt/iris/iris-node && md5sum /opt/iris/iris-node | awk '{print \$1}'"
 done
 
 echo "==> [2/4] 推 master binary 到 ${NAMES[$MASTER_INDEX]}"
-scp_to "$MASTER_INDEX" "$MASTER_BIN" "/opt/zhuanfa/zhuanfa-master.new"
-ssh_run "$MASTER_INDEX" "chmod +x /opt/zhuanfa/zhuanfa-master.new && mv -f /opt/zhuanfa/zhuanfa-master.new /opt/zhuanfa/zhuanfa-master && md5sum /opt/zhuanfa/zhuanfa-master | awk '{print \$1}'"
+scp_to "$MASTER_INDEX" "$MASTER_BIN" "/opt/iris/iris-master.new"
+ssh_run "$MASTER_INDEX" "chmod +x /opt/iris/iris-master.new && mv -f /opt/iris/iris-master.new /opt/iris/iris-master && md5sum /opt/iris/iris-master | awk '{print \$1}'"
 
-echo "==> [3/4] restart zhuanfa-master @ ${NAMES[$MASTER_INDEX]} + 等 7080 ready"
-ssh_run "$MASTER_INDEX" "systemctl restart zhuanfa-master && sleep 3 && curl -fsS http://127.0.0.1:7080/healthz"
+echo "==> [3/4] restart iris-master @ ${NAMES[$MASTER_INDEX]} + 等 7080 ready"
+ssh_run "$MASTER_INDEX" "systemctl restart iris-master && sleep 3 && curl -fsS http://127.0.0.1:7080/healthz"
 
-echo "==> [4/4] restart 所有 zhuanfa-node + 校验跑的是新 binary"
+echo "==> [4/4] restart 所有 iris-node + 校验跑的是新 binary"
 NODE_MD5=$(md5 -q "$NODE_BIN" 2>/dev/null || md5sum "$NODE_BIN" | awk '{print $1}')
 echo "    expected node md5: $NODE_MD5"
 for ((i=0; i<N; i++)); do
     name=${NAMES[$i]}
     for attempt in 1 2 3; do
-        out=$(ssh_run "$i" "systemctl restart zhuanfa-node && sleep 3 && pid=\$(pgrep -x zhuanfa-node | head -1) && md5sum /proc/\$pid/exe | awk '{print \$1}'" 2>&1 | tail -1)
+        out=$(ssh_run "$i" "systemctl restart iris-node && sleep 3 && pid=\$(pgrep -x iris-node | head -1) && md5sum /proc/\$pid/exe | awk '{print \$1}'" 2>&1 | tail -1)
         if [ "$out" = "$NODE_MD5" ]; then
             echo "    ✅ $name → $out"
             break
@@ -113,6 +113,6 @@ done
 echo
 echo "==> 烟测：master 看节点心跳"
 sleep 8
-ssh_run "$MASTER_INDEX" "journalctl -u zhuanfa-master --since '15 sec ago' --no-pager | grep -oE 'heartbeat node=\S+' | sort -u"
+ssh_run "$MASTER_INDEX" "journalctl -u iris-master --since '15 sec ago' --no-pager | grep -oE 'heartbeat node=\S+' | sort -u"
 
 echo "✅ 部署完成"

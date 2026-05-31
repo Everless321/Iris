@@ -107,7 +107,7 @@ export default function Layout() {
           >
             z
           </div>
-          <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 0.2 }}>Zhuanfa</span>
+          <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 0.2 }}>Iris</span>
         </div>
         <Menu
           mode="inline"

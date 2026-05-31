@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Zhuanfa · 高性能转发平台 · 路线图</title>
+<title>Iris · 高性能转发平台 · 路线图</title>
 <style>
   :root{
     --bg:#0b0d10; --panel:#12161c; --panel-2:#181d25;
@@ -133,7 +133,7 @@
   <!-- HEADER -->
   <header>
     <div class="brand">
-      <div class="tag">Project · Zhuanfa</div>
+      <div class="tag">Project · Iris</div>
       <h1>高性能<span class="accent">转发平台</span></h1>
       <p class="sub">基于 Rust 的多级连跳转发控制平台。差异化定位：<b style="color:var(--fg)">智能调度 + SLA 承诺 + 拓扑可视化</b>。覆盖 TCP/UDP L4 透传，自动支持任意上层代理协议。</p>
     </div>
@@ -263,7 +263,7 @@
   </section>
 
   <footer>
-    <span>zhuanfa · roadmap board · 状态保存在浏览器 localStorage</span>
+    <span>iris · roadmap board · 状态保存在浏览器 localStorage</span>
     <button class="reset" onclick="resetAll()">RESET PROGRESS</button>
   </footer>
 
@@ -294,7 +294,7 @@ const PHASES = [
       'node：接收 master 推送的 forward 列表',
       'TCP 数据面：tokio TcpListener + copy_bidirectional',
       '节点间数据面：gRPC streaming 承载 TCP payload',
-      'CLI 工具：zhuanfa-cli add-forward --path=A,B --listen=10080',
+      'CLI 工具：iris-cli add-forward --path=A,B --listen=10080',
       '端到端测试：本地 3 个进程模拟 client/A/B 跑通'
     ]
   },
@@ -382,7 +382,7 @@ PHASES.forEach((p, idx) => {
   `);
 });
 
-const STORE_KEY = 'zhuanfa_progress_v1';
+const STORE_KEY = 'iris_progress_v1';
 function loadState(){ try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } }
 function saveState(s){ localStorage.setItem(STORE_KEY, JSON.stringify(s)); }
 

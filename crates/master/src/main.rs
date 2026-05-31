@@ -11,8 +11,8 @@ use sqlx::SqlitePool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
-use zhuanfa_proto::control::control_server::{Control, ControlServer};
-use zhuanfa_proto::control::{
+use iris_proto::control::control_server::{Control, ControlServer};
+use iris_proto::control::{
     ForwardRule, HeartbeatReply, HeartbeatRequest, Hop as PbHop, HopNode as PbHopNode, NodeAddr,
     SyncReply, SyncRequest, TargetEndpoint as PbTargetEndpoint,
 };
@@ -20,40 +20,40 @@ use zhuanfa_proto::control::{
 use models::ForwardRow;
 
 fn grpc_addr() -> String {
-    std::env::var("ZF_LISTEN").unwrap_or_else(|_| "0.0.0.0:7443".into())
+    std::env::var("IRIS_LISTEN").unwrap_or_else(|_| "0.0.0.0:7443".into())
 }
 fn http_addr() -> String {
-    std::env::var("ZF_HTTP").unwrap_or_else(|_| "0.0.0.0:7080".into())
+    std::env::var("IRIS_HTTP").unwrap_or_else(|_| "0.0.0.0:7080".into())
 }
 fn cert_dir() -> String {
-    std::env::var("ZF_CERT_DIR").unwrap_or_else(|_| "certs".into())
+    std::env::var("IRIS_CERT_DIR").unwrap_or_else(|_| "certs".into())
 }
 fn db_url() -> String {
-    std::env::var("ZF_DB").unwrap_or_else(|_| "sqlite://data/zhuanfa.db".into())
+    std::env::var("IRIS_DB").unwrap_or_else(|_| "sqlite://data/iris.db".into())
 }
 fn probe_interval() -> u64 {
-    std::env::var("ZF_PROBE_INTERVAL").ok().and_then(|s| s.parse().ok()).unwrap_or(15)
+    std::env::var("IRIS_PROBE_INTERVAL").ok().and_then(|s| s.parse().ok()).unwrap_or(15)
 }
 fn fail_threshold() -> i64 {
-    std::env::var("ZF_FAIL_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(2)
+    std::env::var("IRIS_FAIL_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(2)
 }
 fn jwt_secret() -> Vec<u8> {
-    // 生产建议设置 ZF_JWT_SECRET（≥32 字节高熵）；缺失时用 OsRng 生成 32 字节临时密钥
-    if let Ok(s) = std::env::var("ZF_JWT_SECRET") {
+    // 生产建议设置 IRIS_JWT_SECRET（≥32 字节高熵）；缺失时用 OsRng 生成 32 字节临时密钥
+    if let Ok(s) = std::env::var("IRIS_JWT_SECRET") {
         if s.len() < 16 {
-            tracing::warn!(len = s.len(), "ZF_JWT_SECRET 过短，建议 ≥32 字节");
+            tracing::warn!(len = s.len(), "IRIS_JWT_SECRET 过短，建议 ≥32 字节");
         }
         return s.into_bytes();
     }
     use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut k = [0u8; 32];
     OsRng.fill_bytes(&mut k);
-    tracing::warn!("ZF_JWT_SECRET 未设置，使用进程内 32 字节随机秘钥（重启后已有 token 失效）");
+    tracing::warn!("IRIS_JWT_SECRET 未设置，使用进程内 32 字节随机秘钥（重启后已有 token 失效）");
     k.to_vec()
 }
 fn admin_bootstrap() -> Option<(String, String)> {
-    let u = std::env::var("ZF_ADMIN_USER").ok()?;
-    let p = std::env::var("ZF_ADMIN_PASS").ok()?;
+    let u = std::env::var("IRIS_ADMIN_USER").ok()?;
+    let p = std::env::var("IRIS_ADMIN_PASS").ok()?;
     Some((u, p))
 }
 fn now_ms() -> u64 {
@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
     // 首次启动：根据 env 引导 admin 账号（与 register 端点同样强制 ≥6 字符密码）
     if let Some((u, p)) = admin_bootstrap() {
         if p.len() < 6 {
-            anyhow::bail!("ZF_ADMIN_PASS 长度 < 6，拒绝引导 admin");
+            anyhow::bail!("IRIS_ADMIN_PASS 长度 < 6，拒绝引导 admin");
         }
         let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE username=?")
             .bind(&u).fetch_one(&pool).await?;
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
 
     // 预先准备 mTLS client config，让 master 能反向调用节点 DataPlane（用于链路测试 ProbeReach）
     let dir = cert_dir();
-    let paths = zhuanfa_common::ensure_dev_certs(&dir)?;
+    let paths = iris_common::ensure_dev_certs(&dir)?;
     let node_caller_tls = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(std::fs::read(&paths.ca)?))
         .identity(Identity::from_pem(

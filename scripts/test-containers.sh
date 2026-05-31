@@ -54,16 +54,16 @@ cat > docker-compose.nodes.yml <<EOF
 # 3 个节点容器，每个走自己的 enrollment 令牌兑换证书后启动
 services:
   node-a:
-    image: zhuanfa:dev
+    image: iris:dev
     container_name: zf-node-a
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      ZF_MASTER_HTTP: "http://host.docker.internal:7080"
-      ZF_MASTER_GRPC: "https://host.docker.internal:7443"
-      ZF_NODE_ID: "docker-a"
-      ZF_DATA_ADDR: "0.0.0.0:7444"
-      ZF_TOKEN: "$TA"
+      IRIS_MASTER_HTTP: "http://host.docker.internal:7080"
+      IRIS_MASTER_GRPC: "https://host.docker.internal:7443"
+      IRIS_NODE_ID: "docker-a"
+      IRIS_DATA_ADDR: "0.0.0.0:7444"
+      IRIS_TOKEN: "$TA"
       RUST_LOG: info
     ports:
       - "17444:7444"
@@ -73,28 +73,28 @@ services:
       - |
         set -e
         mkdir -p /data/certs
-        RESP=\$\$(curl -fsS -X POST "\$\$ZF_MASTER_HTTP/api/nodes/enroll" \\
+        RESP=\$\$(curl -fsS -X POST "\$\$IRIS_MASTER_HTTP/api/nodes/enroll" \\
           -H 'content-type: application/json' \\
-          -d "{\\"token\\":\\"\$\$ZF_TOKEN\\"}")
+          -d "{\\"token\\":\\"\$\$IRIS_TOKEN\\"}")
         echo "\$\$RESP" | jq -r .ca_pem    > /data/certs/ca.pem
         echo "\$\$RESP" | jq -r .cert_pem  > /data/certs/client.pem
         echo "\$\$RESP" | jq -r .key_pem   > /data/certs/client-key.pem
         chmod 600 /data/certs/*.pem
         echo "==> enrollment ok, starting node"
-        export ZF_MASTER="\$\$ZF_MASTER_GRPC"
-        exec zhuanfa-node
+        export IRIS_MASTER="\$\$IRIS_MASTER_GRPC"
+        exec iris-node
 
   node-b1:
-    image: zhuanfa:dev
+    image: iris:dev
     container_name: zf-node-b1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      ZF_MASTER_HTTP: "http://host.docker.internal:7080"
-      ZF_MASTER_GRPC: "https://host.docker.internal:7443"
-      ZF_NODE_ID: "docker-b1"
-      ZF_DATA_ADDR: "0.0.0.0:7444"
-      ZF_TOKEN: "$TB1"
+      IRIS_MASTER_HTTP: "http://host.docker.internal:7080"
+      IRIS_MASTER_GRPC: "https://host.docker.internal:7443"
+      IRIS_NODE_ID: "docker-b1"
+      IRIS_DATA_ADDR: "0.0.0.0:7444"
+      IRIS_TOKEN: "$TB1"
       RUST_LOG: info
     ports:
       - "17445:7444"
@@ -104,27 +104,27 @@ services:
       - |
         set -e
         mkdir -p /data/certs
-        RESP=\$\$(curl -fsS -X POST "\$\$ZF_MASTER_HTTP/api/nodes/enroll" \\
+        RESP=\$\$(curl -fsS -X POST "\$\$IRIS_MASTER_HTTP/api/nodes/enroll" \\
           -H 'content-type: application/json' \\
-          -d "{\\"token\\":\\"\$\$ZF_TOKEN\\"}")
+          -d "{\\"token\\":\\"\$\$IRIS_TOKEN\\"}")
         echo "\$\$RESP" | jq -r .ca_pem    > /data/certs/ca.pem
         echo "\$\$RESP" | jq -r .cert_pem  > /data/certs/client.pem
         echo "\$\$RESP" | jq -r .key_pem   > /data/certs/client-key.pem
         chmod 600 /data/certs/*.pem
-        export ZF_MASTER="\$\$ZF_MASTER_GRPC"
-        exec zhuanfa-node
+        export IRIS_MASTER="\$\$IRIS_MASTER_GRPC"
+        exec iris-node
 
   node-b2:
-    image: zhuanfa:dev
+    image: iris:dev
     container_name: zf-node-b2
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      ZF_MASTER_HTTP: "http://host.docker.internal:7080"
-      ZF_MASTER_GRPC: "https://host.docker.internal:7443"
-      ZF_NODE_ID: "docker-b2"
-      ZF_DATA_ADDR: "0.0.0.0:7444"
-      ZF_TOKEN: "$TB2"
+      IRIS_MASTER_HTTP: "http://host.docker.internal:7080"
+      IRIS_MASTER_GRPC: "https://host.docker.internal:7443"
+      IRIS_NODE_ID: "docker-b2"
+      IRIS_DATA_ADDR: "0.0.0.0:7444"
+      IRIS_TOKEN: "$TB2"
       RUST_LOG: info
     ports:
       - "17446:7444"
@@ -134,15 +134,15 @@ services:
       - |
         set -e
         mkdir -p /data/certs
-        RESP=\$\$(curl -fsS -X POST "\$\$ZF_MASTER_HTTP/api/nodes/enroll" \\
+        RESP=\$\$(curl -fsS -X POST "\$\$IRIS_MASTER_HTTP/api/nodes/enroll" \\
           -H 'content-type: application/json' \\
-          -d "{\\"token\\":\\"\$\$ZF_TOKEN\\"}")
+          -d "{\\"token\\":\\"\$\$IRIS_TOKEN\\"}")
         echo "\$\$RESP" | jq -r .ca_pem    > /data/certs/ca.pem
         echo "\$\$RESP" | jq -r .cert_pem  > /data/certs/client.pem
         echo "\$\$RESP" | jq -r .key_pem   > /data/certs/client-key.pem
         chmod 600 /data/certs/*.pem
-        export ZF_MASTER="\$\$ZF_MASTER_GRPC"
-        exec zhuanfa-node
+        export IRIS_MASTER="\$\$IRIS_MASTER_GRPC"
+        exec iris-node
 EOF
 
 # 清掉旧容器

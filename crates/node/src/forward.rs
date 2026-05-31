@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
-use zhuanfa_proto::control::TargetEndpoint;
+use iris_proto::control::TargetEndpoint;
 
 use crate::dataplane::TargetRouter;
 use crate::sock;

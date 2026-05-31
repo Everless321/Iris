@@ -15,9 +15,9 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::lb::{ConnGuard, LoadBalancer, NodeView};
-use zhuanfa_proto::control::data_plane_client::DataPlaneClient;
-use zhuanfa_proto::control::data_plane_server::DataPlane;
-use zhuanfa_proto::control::{
+use iris_proto::control::data_plane_client::DataPlaneClient;
+use iris_proto::control::data_plane_server::DataPlane;
+use iris_proto::control::{
     Chunk, Hop, ProbeReachReply, ProbeReachRequest, TargetEndpoint, TunnelHeader,
 };
 
@@ -308,7 +308,7 @@ async fn handle_entry_conn(
     lb: &LoadBalancer,
 ) -> Result<()> {
     let view = ctx.view();
-    if std::env::var("ZF_DISABLE_RAW").as_deref() == Ok("1") {
+    if std::env::var("IRIS_DISABLE_RAW").as_deref() == Ok("1") {
         let (resp, req_tx, guard) = connect_next(
             ctx, lb, &hops_rest, targets, target_strategy, client_ip,
             forward_id, 1, &view, "",

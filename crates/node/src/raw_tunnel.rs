@@ -19,7 +19,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter};
 use crate::lb::{LoadBalancer, NodeView};
 use crate::sock;
-use zhuanfa_proto::control::{Hop, TargetEndpoint, TunnelHeader};
+use iris_proto::control::{Hop, TargetEndpoint, TunnelHeader};
 
 const BUF: usize = 64 * 1024;
 const MAX_HEADER: usize = 64 * 1024;

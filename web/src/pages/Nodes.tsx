@@ -63,7 +63,7 @@ function InstallDialog({
           type="warning"
           showIcon
           message="当前链路不安全"
-          description="你正通过 HTTP 访问 master。生产部署请套上 HTTPS 并在 master 设置 ZF_REQUIRE_TLS=1。"
+          description="你正通过 HTTP 访问 master。生产部署请套上 HTTPS 并在 master 设置 IRIS_REQUIRE_TLS=1。"
           style={{ marginBottom: 16 }}
         />
       )}
