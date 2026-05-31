@@ -22,14 +22,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
 
       - name: Build web
         working-directory: web
-        # 不用 lock 文件：rollup native binary 在 lock 里是 platform-specific
-        # （macOS 生成的 lock 在 Linux runner 上少 linux-x64-gnu），临时用 npm install
-        # 不固定版本。task #15 留到 lock 跨平台问题彻底解决后再 enable npm ci
+        # rollup linux-x64-gnu 已显式列在 optionalDependencies，无论 lock 在哪生成都能装
+        # 不传 --no-audit：让 high-severity 漏洞失败 CI（supply-chain 防护）
         run: |
-          npm install --include=optional --no-audit --no-fund
+          npm ci --include=optional --no-fund
           npm run build
 
       - name: Install musl tools
