@@ -105,7 +105,7 @@ pub(crate) const UDP_BUF: usize = 64 * 1024;
 /// 从 TunnelHeader 取出有效目标列表：优先用新字段 targets，
 /// 不存在时回退到旧的单字符串 target（兼容滚动升级期）。
 #[allow(deprecated)]
-fn effective_targets(h: &TunnelHeader) -> Vec<TargetEndpoint> {
+pub(crate) fn effective_targets(h: &TunnelHeader) -> Vec<TargetEndpoint> {
     if !h.targets.is_empty() {
         return h.targets.clone();
     }
@@ -118,7 +118,7 @@ fn effective_targets(h: &TunnelHeader) -> Vec<TargetEndpoint> {
 }
 
 /// 双向桥接协调：任一方向结束即中止另一方向。
-fn link(mut a: tokio::task::JoinHandle<()>, mut b: tokio::task::JoinHandle<()>) {
+pub(crate) fn link(mut a: tokio::task::JoinHandle<()>, mut b: tokio::task::JoinHandle<()>) {
     tokio::spawn(async move {
         tokio::select! {
             _ = &mut a => b.abort(),
@@ -136,6 +136,8 @@ pub struct NodeInfo {
 pub struct NodeCtx {
     pub nodes: RwLock<HashMap<String, NodeInfo>>,
     pub tls_client: ClientTlsConfig,
+    /// Phase 9a：raw_tunnel 拨号用，与 tls_client 同信任域
+    pub raw_connector: tokio_rustls::TlsConnector,
 }
 
 impl NodeCtx {
@@ -296,21 +298,23 @@ async fn handle_entry_conn(
     lb: &LoadBalancer,
 ) -> Result<()> {
     let view = ctx.view();
-    let (resp, req_tx, guard) = connect_next(
-        ctx,
-        lb,
-        &hops_rest,
-        targets,
-        target_strategy,
-        client_ip,
-        forward_id,
-        1,
-        &view,
-        "",
-    )
-    .await?;
-    let _g = guard;
-    bridge_tcp(inbound, resp, req_tx).await;
+    if std::env::var("ZF_DISABLE_RAW").as_deref() == Ok("1") {
+        let (resp, req_tx, guard) = connect_next(
+            ctx, lb, &hops_rest, targets, target_strategy, client_ip,
+            forward_id, 1, &view, "",
+        )
+        .await?;
+        let _g = guard;
+        bridge_tcp(inbound, resp, req_tx).await;
+    } else {
+        // Phase 9a: 走 raw_tunnel（去 HTTP/2 framing）
+        let (nr, nw) = crate::raw_tunnel::open_next_hop(
+            ctx, lb, &hops_rest, targets, target_strategy, client_ip,
+            forward_id, 1, "", &view, ctx.raw_connector.clone(),
+        )
+        .await?;
+        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw).await;
+    }
     Ok(())
 }
 

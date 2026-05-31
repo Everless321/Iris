@@ -1,0 +1,527 @@
+// Phase 9a: 节点间数据面替代实现。
+// 直接 mTLS over TCP + 4-byte BE length-prefix framing，绕过 tonic / gRPC HTTP/2。
+// 每条连接服务一条 forward tunnel（与 gRPC Tunnel 语义一致）。
+
+use anyhow::{anyhow, Context, Result};
+use prost::Message;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use std::io::BufReader;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream as ClientTlsStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::server::TlsStream as ServerTlsStream;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter, UDP_BUF};
+use crate::lb::{LoadBalancer, NodeView};
+use crate::sock;
+use zhuanfa_proto::control::{Hop, TargetEndpoint, TunnelHeader};
+
+const BUF: usize = 64 * 1024;
+const MAX_HEADER: usize = 64 * 1024;
+const MAX_FRAME: usize = 256 * 1024;
+
+/// 用启动时已加载的 PEM 构造 rustls 双向 mTLS 配置（serve + dial）。
+/// 与现有 tonic ServerTlsConfig/ClientTlsConfig 同源（同 CA / 同 identity），
+/// 因此老 gRPC 7444 与新 raw 7445 是同一信任域。
+pub fn build_configs(
+    ca_pem: &[u8],
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<(Arc<ServerConfig>, Arc<ClientConfig>)> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(ca_pem))
+        .filter_map(|r| r.ok())
+        .collect();
+    if ca_certs.is_empty() {
+        return Err(anyhow!("no CA cert found in ca.pem"));
+    }
+    let mut roots = RootCertStore::empty();
+    for c in &ca_certs {
+        roots
+            .add(c.clone())
+            .map_err(|e| anyhow!("add CA to root store: {e:?}"))?;
+    }
+    let roots_arc = Arc::new(roots);
+
+    let identity_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut BufReader::new(cert_pem))
+            .filter_map(|r| r.ok())
+            .collect();
+    if identity_certs.is_empty() {
+        return Err(anyhow!("no identity cert found in client.pem"));
+    }
+    let private_key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(key_pem))
+        .map_err(|e| anyhow!("parse private key: {e}"))?
+        .ok_or_else(|| anyhow!("no private key in client-key.pem"))?;
+
+    let client_verifier =
+        rustls::server::WebPkiClientVerifier::builder(roots_arc.clone()).build()?;
+    let server_cfg = ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(identity_certs.clone(), private_key.clone_key())?;
+
+    let client_cfg = ClientConfig::builder()
+        .with_root_certificates(roots_arc.as_ref().clone())
+        .with_client_auth_cert(identity_certs, private_key)?;
+
+    Ok((Arc::new(server_cfg), Arc::new(client_cfg)))
+}
+
+async fn read_frame<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    match r.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 {
+        return Ok(None);
+    }
+    if len > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame too large: {len}"),
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(Some(buf))
+}
+
+async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, data: &[u8]) -> std::io::Result<()> {
+    let len = data.len() as u32;
+    w.write_all(&len.to_be_bytes()).await?;
+    if !data.is_empty() {
+        w.write_all(data).await?;
+    }
+    Ok(())
+}
+
+/// "host:7444" → "host:7445"
+pub(crate) fn grpc_to_raw_addr(addr: &str) -> Option<String> {
+    let (host, port_s) = addr.rsplit_once(':')?;
+    let port: u16 = port_s.parse().ok()?;
+    Some(format!("{host}:{}", port.checked_add(1)?))
+}
+
+// ============================== Server ==============================
+
+pub async fn serve(
+    addr: SocketAddr,
+    tls_acceptor: TlsAcceptor,
+    tls_connector: TlsConnector,
+    ctx: Arc<NodeCtx>,
+    lb: Arc<LoadBalancer>,
+    target_router: Arc<TargetRouter>,
+) -> Result<()> {
+    let listener = sock::tcp_listen(addr)?;
+    tracing::info!(%addr, "raw_tunnel server listening (mTLS)");
+    loop {
+        let (sock, _peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, "raw accept");
+                continue;
+            }
+        };
+        sock::tune_accepted(&sock);
+        let acceptor = tls_acceptor.clone();
+        let connector = tls_connector.clone();
+        let ctx = ctx.clone();
+        let lb = lb.clone();
+        let tr = target_router.clone();
+        tokio::spawn(async move {
+            let tls = match acceptor.accept(sock).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(error = %e, "raw tls handshake");
+                    return;
+                }
+            };
+            if let Err(e) = handle_conn(tls, connector, ctx, lb, tr).await {
+                tracing::debug!(error = %e, "raw conn ended");
+            }
+        });
+    }
+}
+
+async fn handle_conn(
+    tls: ServerTlsStream<TcpStream>,
+    tls_connector: TlsConnector,
+    ctx: Arc<NodeCtx>,
+    lb: Arc<LoadBalancer>,
+    tr: Arc<TargetRouter>,
+) -> Result<()> {
+    let (mut r, w) = tokio::io::split(tls);
+    let header_bytes = read_frame(&mut r, MAX_HEADER)
+        .await?
+        .ok_or_else(|| anyhow!("missing tunnel header"))?;
+    let header = TunnelHeader::decode(&*header_bytes).context("decode TunnelHeader")?;
+
+    if header.remaining_hops.is_empty() {
+        if header.udp_src_addr.is_empty() {
+            exit_tcp(&header, &tr, r, w).await
+        } else {
+            exit_udp(&header, &tr, r, w).await
+        }
+    } else {
+        relay(&header, ctx, lb, tls_connector, r, w).await
+    }
+}
+
+async fn exit_tcp(
+    header: &TunnelHeader,
+    tr: &TargetRouter,
+    mut r: ReadHalf<ServerTlsStream<TcpStream>>,
+    mut w: WriteHalf<ServerTlsStream<TcpStream>>,
+) -> Result<()> {
+    let targets = effective_targets(header);
+    if targets.is_empty() {
+        return Err(anyhow!("no targets"));
+    }
+    let ordered = tr.order(
+        &targets,
+        &header.target_strategy,
+        &header.client_ip,
+        header.forward_id,
+    );
+    let mut tcp_opt: Option<TcpStream> = None;
+    let mut picked = String::new();
+    for addr in &ordered {
+        match sock::tcp_connect(addr).await {
+            Ok(s) => {
+                picked = addr.clone();
+                tcp_opt = Some(s);
+                break;
+            }
+            Err(e) => tracing::debug!(target = %addr, error = %e, "raw exit failover"),
+        }
+    }
+    let tcp = tcp_opt.ok_or_else(|| anyhow!("all tcp targets failed"))?;
+    tracing::info!(target = %picked, "raw exit tcp picked");
+    let (mut t_r, mut t_w) = tcp.into_split();
+
+    let up = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut r, MAX_FRAME).await {
+                Ok(Some(data)) => {
+                    if t_w.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+    let down = tokio::spawn(async move {
+        let mut buf = vec![0u8; BUF];
+        loop {
+            match t_r.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if write_frame(&mut w, &buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    link(up, down);
+    Ok(())
+}
+
+async fn exit_udp(
+    header: &TunnelHeader,
+    tr: &TargetRouter,
+    mut r: ReadHalf<ServerTlsStream<TcpStream>>,
+    mut w: WriteHalf<ServerTlsStream<TcpStream>>,
+) -> Result<()> {
+    let targets = effective_targets(header);
+    if targets.is_empty() {
+        return Err(anyhow!("no targets"));
+    }
+    let ordered = tr.order(
+        &targets,
+        &header.target_strategy,
+        &header.client_ip,
+        header.forward_id,
+    );
+    let pick = ordered
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("no udp target"))?;
+    let usock = sock::udp_bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
+    usock.connect(&pick).await?;
+    let usock = Arc::new(usock);
+    tracing::info!(target = %pick, src = %header.udp_src_addr, "raw exit udp picked");
+    let usock_up = usock.clone();
+    let up = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut r, UDP_BUF).await {
+                Ok(Some(data)) if !data.is_empty() => {
+                    if usock_up.send(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+    });
+    let usock_dn = usock;
+    let down = tokio::spawn(async move {
+        let mut buf = vec![0u8; UDP_BUF];
+        loop {
+            match usock_dn.recv(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if write_frame(&mut w, &buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    link(up, down);
+    Ok(())
+}
+
+async fn relay(
+    header: &TunnelHeader,
+    ctx: Arc<NodeCtx>,
+    lb: Arc<LoadBalancer>,
+    tls_connector: TlsConnector,
+    mut r: ReadHalf<ServerTlsStream<TcpStream>>,
+    mut w: WriteHalf<ServerTlsStream<TcpStream>>,
+) -> Result<()> {
+    let relay_targets = effective_targets(header);
+    let view = ctx.view();
+    let (mut nr, mut nw) = open_next_hop(
+        &ctx,
+        &lb,
+        &header.remaining_hops,
+        &relay_targets,
+        &header.target_strategy,
+        &header.client_ip,
+        header.forward_id,
+        header.hop_index,
+        &header.udp_src_addr,
+        &view,
+        tls_connector,
+    )
+    .await?;
+
+    let up = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut r, MAX_FRAME).await {
+                Ok(Some(data)) => {
+                    if write_frame(&mut nw, &data).await.is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+    let down = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut nr, MAX_FRAME).await {
+                Ok(Some(data)) => {
+                    if write_frame(&mut w, &data).await.is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+    link(up, down);
+    Ok(())
+}
+
+// ============================== Client ==============================
+
+/// 向下一跳建立 raw mTLS tunnel，发送 header 首帧，返回 split 读写两端。
+/// 入口节点用、relay 节点中转也用。
+#[allow(clippy::too_many_arguments)]
+pub async fn open_next_hop(
+    ctx: &NodeCtx,
+    lb: &LoadBalancer,
+    remaining_hops: &[Hop],
+    targets: &[TargetEndpoint],
+    target_strategy: &str,
+    client_ip: &str,
+    forward_id: i64,
+    hop_index: u32,
+    udp_src_addr: &str,
+    view: &NodeView,
+    tls_connector: TlsConnector,
+) -> Result<(
+    ReadHalf<ClientTlsStream<TcpStream>>,
+    WriteHalf<ClientTlsStream<TcpStream>>,
+)> {
+    let hop = &remaining_hops[0];
+    let ip: IpAddr = client_ip
+        .parse()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let candidates = lb.select_ordered(forward_id, hop_index as usize, hop, ip, view);
+    let rest: Vec<Hop> = remaining_hops[1..].to_vec();
+    for node_id in &candidates {
+        let addr = match ctx.addr_of(node_id) {
+            Some(a) => a,
+            None => continue,
+        };
+        let raw_addr = match grpc_to_raw_addr(&addr) {
+            Some(a) => a,
+            None => continue,
+        };
+        match try_open(
+            &raw_addr,
+            &rest,
+            targets,
+            target_strategy,
+            client_ip,
+            forward_id,
+            hop_index + 1,
+            udp_src_addr,
+            tls_connector.clone(),
+        )
+        .await
+        {
+            Ok(parts) => {
+                tracing::info!(hop = hop_index, pick = %node_id, "raw next-hop selected");
+                return Ok(parts);
+            }
+            Err(e) => {
+                tracing::warn!(node = %node_id, error = %e, "raw next-hop failed");
+                continue;
+            }
+        }
+    }
+    Err(anyhow!("hop {}: all raw candidates failed", hop_index))
+}
+
+#[allow(deprecated, clippy::too_many_arguments)]
+async fn try_open(
+    addr: &str,
+    rest_hops: &[Hop],
+    targets: &[TargetEndpoint],
+    target_strategy: &str,
+    client_ip: &str,
+    forward_id: i64,
+    next_hop_index: u32,
+    udp_src_addr: &str,
+    tls_connector: TlsConnector,
+) -> Result<(
+    ReadHalf<ClientTlsStream<TcpStream>>,
+    WriteHalf<ClientTlsStream<TcpStream>>,
+)> {
+    let sock = sock::tcp_connect(addr).await?;
+    let server_name = ServerName::try_from("localhost")?;
+    let tls = tls_connector.connect(server_name, sock).await?;
+    let (r, mut w) = tokio::io::split(tls);
+
+    let legacy_target = targets
+        .first()
+        .map(|t| t.addr.clone())
+        .unwrap_or_default();
+    let header = TunnelHeader {
+        remaining_hops: rest_hops.to_vec(),
+        target: legacy_target,
+        client_ip: client_ip.to_string(),
+        forward_id,
+        hop_index: next_hop_index,
+        targets: targets.to_vec(),
+        target_strategy: target_strategy.to_string(),
+        udp_src_addr: udp_src_addr.to_string(),
+    };
+    let buf = header.encode_to_vec();
+    write_frame(&mut w, &buf).await?;
+    Ok((r, w))
+}
+
+// ============================== Entry helpers ==============================
+
+/// TCP 入口连接 → raw tunnel 桥接。
+pub async fn handle_entry_tcp(
+    inbound: TcpStream,
+    nr: ReadHalf<ClientTlsStream<TcpStream>>,
+    nw: WriteHalf<ClientTlsStream<TcpStream>>,
+) {
+    let (mut ir, mut iw) = inbound.into_split();
+    let mut nr = nr;
+    let mut nw = nw;
+    let up = tokio::spawn(async move {
+        let mut buf = vec![0u8; BUF];
+        loop {
+            match ir.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if write_frame(&mut nw, &buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let down = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut nr, MAX_FRAME).await {
+                Ok(Some(data)) => {
+                    if iw.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+    link(up, down);
+}
+
+/// UDP 入口的反向回包 task：从 raw tunnel 读 frame → socket.send_to(src)。
+/// 由 udp_forward 调用，配合 send_udp_packet 形成 UDP session。
+pub async fn udp_recv_loop(
+    mut nr: ReadHalf<ClientTlsStream<TcpStream>>,
+    sock: Arc<tokio::net::UdpSocket>,
+    src: SocketAddr,
+    last_seen: Arc<std::sync::atomic::AtomicI64>,
+) {
+    loop {
+        match read_frame(&mut nr, UDP_BUF).await {
+            Ok(Some(data)) if !data.is_empty() => {
+                last_seen.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+                let _ = sock.send_to(&data, src).await;
+            }
+            Ok(Some(_)) => continue,
+            _ => break,
+        }
+    }
+}
+
+/// UDP 入口的发送：把 packet 写入 raw tunnel。
+pub async fn udp_send_packet(
+    nw: &tokio::sync::Mutex<WriteHalf<ClientTlsStream<TcpStream>>>,
+    data: &[u8],
+) -> std::io::Result<()> {
+    let mut g = nw.lock().await;
+    write_frame(&mut *g, data).await
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
