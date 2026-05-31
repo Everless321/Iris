@@ -67,10 +67,12 @@ async fn main() -> Result<()> {
     // tonic 用（保持 gRPC 数据面 + 控制面兼容）
     let ca = Certificate::from_pem(&ca_pem);
     let identity = Identity::from_pem(&cert_pem, &key_pem);
+    // SNI 用 master 稳定身份名（master server.pem SAN v2 含 zhuanfa-master + localhost 兼容）。
+    // node → node gRPC 的 SNI 在 dataplane::connect_dataplane per-call override 为对方 node_id。
     let tls_client = ClientTlsConfig::new()
         .ca_certificate(ca.clone())
         .identity(identity.clone())
-        .domain_name("localhost");
+        .domain_name("zhuanfa-master");
     let dp_tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(ca);

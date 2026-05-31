@@ -754,6 +754,8 @@ async fn test_forward(
             let tls = tls.clone();
             let from_id = from.clone();
             set.spawn(async move {
+                // SNI 用目标 node_id：rustls 校验对方 cert SAN 含此 node_id，绑定 cert 到具体节点。
+                let tls = tls.domain_name(from_id.clone());
                 // 建一次 channel，串行 probe 所有目标
                 let ep_res = Endpoint::from_shared(format!("https://{from_addr}"))
                     .and_then(|e| e.tls_config(tls));

@@ -64,34 +64,61 @@ impl CertPaths {
     }
 }
 
-/// master 启动时确保证书齐全；首次启动生成 CA + server + 一份共享 client（保留供 dev 使用）。
-/// CA 私钥（ca-key.pem）会持久化，用于后续按需签发节点专属证书。
+/// 当前 server cert 的 SAN 版本（含 zhuanfa-master 身份名后 = v2）。
+/// 老版本（仅 localhost + 127.0.0.1）的部署会自动迁移：删 server pair 重签，不动 CA + 共享 client。
+const SERVER_CERT_VERSION: &str = "v2-mtls-sni";
+
+/// master 启动时确保证书齐全。CA 一次生成持久化；server pair / 共享 client pair 按需补齐。
+/// 旧 server.pem（SAN 仅 localhost+127.0.0.1）会自动迁移到 v2（加 SAN=zhuanfa-master），
+/// CA + 已签发的 node cert 不动 — 滚动升级安全。
 pub fn ensure_dev_certs(dir: &str) -> Result<CertPaths> {
     let paths = CertPaths::under(dir);
-    if paths.ctrl_exists() && Path::new(&paths.ca_key).exists() {
-        return Ok(paths);
+    create_secure_dir(dir).ok();
+
+    // CA：缺则生成 + 持久化；存在则加载（共享 ca_cert 用于签 leaf）
+    let (ca_cert, ca_key) = if Path::new(&paths.ca).exists() && Path::new(&paths.ca_key).exists() {
+        load_ca(dir)?
+    } else {
+        let ca_key = KeyPair::generate().context("gen ca key")?;
+        let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, "zhuanfa-ca");
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca_cert = ca_params.self_signed(&ca_key).context("self-sign ca")?;
+        fs::write(&paths.ca, ca_cert.pem())?;
+        write_with_mode(&paths.ca_key, &ca_key.serialize_pem(), 0o600)?;
+        (ca_cert, ca_key)
+    };
+
+    // server pair：用版本标记决定要不要重签。缺标记 = 旧版（仅 localhost SAN）→ 自动迁移。
+    let version_marker = format!("{dir}/.server-cert-version");
+    let server_missing =
+        !Path::new(&paths.server).exists() || !Path::new(&paths.server_key).exists();
+    let version_stale = !matches!(
+        fs::read_to_string(&version_marker),
+        Ok(v) if v.trim() == SERVER_CERT_VERSION
+    );
+    if server_missing || version_stale {
+        // SAN 加 zhuanfa-master（节点 dial 时 SNI 用此身份名）；保留 localhost+127.0.0.1 兼容旧 client。
+        let san = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "zhuanfa-master".to_string(),
+        ];
+        let (server_pem, server_key_pem) = leaf(&san, "zhuanfa-master", &ca_cert, &ca_key)?;
+        fs::write(&paths.server, server_pem)?;
+        write_with_mode(&paths.server_key, &server_key_pem, 0o600)?;
+        write_with_mode(&version_marker, SERVER_CERT_VERSION, 0o600)?;
     }
-    create_secure_dir(dir)?;
 
-    // CA
-    let ca_key = KeyPair::generate().context("gen ca key")?;
-    let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.distinguished_name.push(DnType::CommonName, "zhuanfa-ca");
-    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let ca_cert = ca_params.self_signed(&ca_key).context("self-sign ca")?;
+    // 共享 client pair：master 反向 probe 节点时复用（per-call domain_name=目标 node_id）。缺则补。
+    if !Path::new(&paths.client).exists() || !Path::new(&paths.client_key).exists() {
+        let san = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        let (client_pem, client_key_pem) = leaf(&san, "zhuanfa-node", &ca_cert, &ca_key)?;
+        fs::write(&paths.client, client_pem)?;
+        write_with_mode(&paths.client_key, &client_key_pem, 0o600)?;
+    }
 
-    let san = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-    let (server_pem, server_key_pem) = leaf(&san, "zhuanfa-master", &ca_cert, &ca_key)?;
-    let (client_pem, client_key_pem) = leaf(&san, "zhuanfa-node", &ca_cert, &ca_key)?;
-
-    // 证书(public)用默认 644；私钥严格 600（CA 私钥泄露 → 整个信任链失守）
-    fs::write(&paths.ca, ca_cert.pem())?;
-    write_with_mode(&paths.ca_key, &ca_key.serialize_pem(), 0o600)?;
-    fs::write(&paths.server, server_pem)?;
-    write_with_mode(&paths.server_key, &server_key_pem, 0o600)?;
-    fs::write(&paths.client, client_pem)?;
-    write_with_mode(&paths.client_key, &client_key_pem, 0o600)?;
     Ok(paths)
 }
 
