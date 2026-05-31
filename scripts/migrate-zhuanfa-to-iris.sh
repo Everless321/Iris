@@ -40,9 +40,7 @@ else
     echo "    $OLD_DIR 不存在，跳过"
 fi
 
-# 二进制 + db 改名（按存在性判断；master 节点有 db，node 节点没有）
-[ -f "$NEW_DIR/zhuanfa-master" ] && mv "$NEW_DIR/zhuanfa-master" "$NEW_DIR/iris-master" && echo "    master binary renamed"
-[ -f "$NEW_DIR/zhuanfa-node" ]   && mv "$NEW_DIR/zhuanfa-node"   "$NEW_DIR/iris-node"   && echo "    node binary renamed"
+# db 改名（仅 master 节点有 db）— binary 在 [6/6] 处理（避免旧 zhuanfa binary 在新路径下被启动）
 if [ -f "$NEW_DIR/data/$OLD_DB" ]; then
     mv "$NEW_DIR/data/$OLD_DB" "$NEW_DIR/data/$NEW_DB"
     echo "    db renamed → $NEW_DB"
@@ -64,7 +62,7 @@ for i in 0 1; do
     src="/etc/systemd/system/$old_u.service"
     dst="/etc/systemd/system/$new_u.service"
     if [ -f "$src" ]; then
-        # sed: 路径 / 二进制名 / db 文件名 / env 变量 / unit 描述都替换
+        # sed: 路径 / 二进制名 / db 文件名 / env 变量 / unit 描述都替换（含 Title Case）
         sed -E '
             s|/opt/zhuanfa|/opt/iris|g
             s|zhuanfa-master|iris-master|g
@@ -72,12 +70,33 @@ for i in 0 1; do
             s|\bzhuanfa\.db|iris.db|g
             s|\bZF_|IRIS_|g
             s|\bzhuanfa\b|iris|g
+            s|\bZhuanfa\b|Iris|g
+            s|\bZHUANFA\b|IRIS|g
         ' "$src" > "$dst"
         echo "    wrote $dst (from $src)"
     elif [ ! -f "$dst" ]; then
         echo "    ⚠️  $src 不存在且 $dst 也不存在 — 你可能需要手动写 unit"
     fi
 done
+
+echo "==> [4b/6] 转换 EnvironmentFile (.env) 内容"
+# systemd unit 经常用 EnvironmentFile=/opt/.../node.env 而不是 inline Environment=
+# 这些 .env 文件不会被 [4/6] 处理。在这里做内容 sed。
+# 注意：仅替换路径 / db 名 / env 变量名 / binary 名；不替换 Title Case Zhuanfa /
+# 小写 zhuanfa 单词，避免破坏 .env 里含品牌字符串的值（如 admin 密码、token、注释等）
+shopt -s nullglob
+for f in "$NEW_DIR"/*.env "$NEW_DIR"/conf/*.env; do
+    [ -f "$f" ] || continue
+    sed -i -E '
+        s|/opt/zhuanfa|/opt/iris|g
+        s|\bzhuanfa\.db|iris.db|g
+        s|\bZF_|IRIS_|g
+        s|zhuanfa-master|iris-master|g
+        s|zhuanfa-node|iris-node|g
+    ' "$f"
+    echo "    sed $f"
+done
+shopt -u nullglob
 
 systemctl daemon-reload
 
@@ -95,38 +114,22 @@ for i in 0 1; do
     fi
 done
 
-echo "==> [6/6] 启动新服务并验证"
-started=()
-for i in 0 1; do
-    new_u="${NEW_UNITS[$i]}"
-    if [ -f "/etc/systemd/system/$new_u.service" ]; then
-        systemctl start "$new_u.service" && started+=("$new_u") && echo "    started $new_u.service"
-    fi
-done
-
-sleep 3
-for u in "${started[@]}"; do
-    if systemctl is-active "$u.service" >/dev/null 2>&1; then
-        echo "    ✅ $u.service active"
-    else
-        echo "    ❌ $u.service NOT active — journalctl -u $u --since '1 min ago'"
-    fi
-done
-
-# master 节点：调 /healthz
-if systemctl is-active iris-master.service >/dev/null 2>&1; then
-    if curl -fsS http://127.0.0.1:7080/healthz >/dev/null; then
-        echo "    ✅ iris-master /healthz OK"
-    else
-        echo "    ⚠️  iris-master /healthz 失败"
-    fi
-fi
-
+echo "==> [6/6] 环境就绪（不自动启动 — 等新 iris binary 推送完成后再 systemctl start）"
+# 把旧 zhuanfa 二进制改名占位（仅为防止 iris-master.service ExecStart 路径报 Not Found；
+# 真正可执行的 iris-* binary 由 deploy 脚本推送覆盖）
+[ -f "$NEW_DIR/zhuanfa-master" ] && mv "$NEW_DIR/zhuanfa-master" "$NEW_DIR/iris-master.placeholder" 2>/dev/null
+[ -f "$NEW_DIR/zhuanfa-node" ]   && mv "$NEW_DIR/zhuanfa-node"   "$NEW_DIR/iris-node.placeholder"   2>/dev/null
+echo "    旧 binary 标记为 .placeholder（待新 iris binary 覆盖）"
 echo
-echo "迁移完成。如果一切 OK 可以清理旧 unit 文件："
+echo "迁移阶段完成。剩余操作（在 deploy 机器上）："
+echo "    1) scp artifact/iris-master root@<host>:$NEW_DIR/iris-master"
+echo "    2) scp artifact/iris-node   root@<host>:$NEW_DIR/iris-node"
+echo "    3) chmod +x $NEW_DIR/iris-{master,node}"
+echo "    4) systemctl start iris-master.service iris-node.service"
+echo
+echo "全部 OK 后清理："
 for u in "${OLD_UNITS[@]}"; do
     [ -f "/etc/systemd/system/$u.service" ] && echo "    rm /etc/systemd/system/$u.service"
 done
-echo
-echo "本地（运维机器）操作提示："
-echo "    mv ~/.zhuanfa ~/.iris  # 配置目录"
+[ -f "$NEW_DIR/iris-master.placeholder" ] && echo "    rm $NEW_DIR/iris-master.placeholder"
+[ -f "$NEW_DIR/iris-node.placeholder" ]   && echo "    rm $NEW_DIR/iris-node.placeholder"
