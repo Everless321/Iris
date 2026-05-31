@@ -249,6 +249,65 @@ async fn list_forwards(claims: Claims, State(s): State<AppState>) -> Result<Json
     Ok(Json(rows.into_iter().map(Forward::from).collect()))
 }
 
+/// 校验 forward 入口 + 端口 + 协议是否与已 enabled 的其它 forward 冲突。
+/// 冲突条件：listen_port 相同 && 协议交集非空 && hops[0] 节点交集非空。
+/// 跨 owner 同样阻断 — node 端是单点 bind，跟 owner 无关。
+/// `exclude_id` 用于 update 时排除自己。
+async fn check_entry_port_conflict(
+    pool: &sqlx::SqlitePool,
+    listen_port: i64,
+    protocol: &str,
+    entry_node_ids: &[String],
+    exclude_id: Option<i64>,
+) -> Result<(), ApiErr> {
+    use std::collections::HashSet;
+    let new_protos: HashSet<&str> = protocol
+        .split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let entry_set: HashSet<&str> = entry_node_ids.iter().map(|s| s.as_str()).collect();
+    if new_protos.is_empty() || entry_set.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query_as::<_, ForwardRow>(
+        "SELECT * FROM forwards WHERE enabled=1 AND listen_port=?",
+    )
+    .bind(listen_port)
+    .fetch_all(pool)
+    .await
+    .map_err(err)?;
+    for r in rows {
+        if Some(r.id) == exclude_id {
+            continue;
+        }
+        let r_protos: HashSet<&str> = r
+            .protocol
+            .split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if new_protos.is_disjoint(&r_protos) {
+            continue;
+        }
+        let hops = r.hops();
+        let r_entry: HashSet<&str> = hops
+            .first()
+            .map(|h| h.nodes.iter().map(|n| n.id.as_str()).collect())
+            .unwrap_or_default();
+        let overlap: Vec<&str> = entry_set.intersection(&r_entry).copied().collect();
+        if !overlap.is_empty() {
+            let proto_overlap: Vec<&str> = new_protos.intersection(&r_protos).copied().collect();
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "端口 {} 冲突：转发 '{}' (id={}) 已在节点 [{}] 使用 {} 协议",
+                    listen_port,
+                    r.name,
+                    r.id,
+                    overlap.join(","),
+                    proto_overlap.join("+")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn create_forward(
     claims: Claims,
     State(s): State<AppState>,
@@ -282,6 +341,12 @@ async fn create_forward(
             }
         }
     }
+    // 入口节点 + 端口 + 协议冲突校验（避免 node 端 bind 失败）
+    let entry_ids: Vec<String> = hops
+        .first()
+        .map(|h| h.nodes.iter().map(|n| n.id.clone()).collect())
+        .unwrap_or_default();
+    check_entry_port_conflict(&s.pool, f.listen_port, &protocol, &entry_ids, None).await?;
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
     let targets_json = serde_json::to_string(&targets).map_err(err)?;
     let now = now_ms();
@@ -347,6 +412,12 @@ async fn update_forward(
             }
         }
     }
+    // 入口节点 + 端口 + 协议冲突校验（排除自己）
+    let entry_ids: Vec<String> = hops
+        .first()
+        .map(|h| h.nodes.iter().map(|n| n.id.clone()).collect())
+        .unwrap_or_default();
+    check_entry_port_conflict(&s.pool, f.listen_port, &protocol, &entry_ids, Some(id)).await?;
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
     let targets_json = serde_json::to_string(&targets).map_err(err)?;
     sqlx::query(
