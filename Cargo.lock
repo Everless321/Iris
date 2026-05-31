@@ -1130,6 +1130,7 @@ dependencies = [
  "jsonwebtoken",
  "mime_guess",
  "rust-embed",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",

@@ -13,6 +13,9 @@ iris-proto = { path = "../proto" }
 iris-common = { path = "../common" }
 tokio.workspace = true
 tonic.workspace = true
+# 显式 install rustls crypto provider — feature unification 后 ring+aws_lc_rs 共存,
+# rustls 无法自动决定 default,必须 install_default() 才不 panic
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "tls12", "std"] }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

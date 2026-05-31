@@ -177,6 +177,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // feature unification 后 rustls 同时启用了 ring + aws_lc_rs（来自 tonic 间接 + node 切换），
+    // 不显式 install 会 panic。选 aws_lc_rs（AES-NI 加速，与 node 一致）。
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     std::fs::create_dir_all("data").ok();
     let pool = db::init(&db_url()).await?;
     tracing::info!(url = %db_url(), "sqlite ready (migrated)");
