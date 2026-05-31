@@ -18,10 +18,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 socket2 = { version = "0.5", features = ["all"] }
 # Phase 9a raw_tunnel：直接 rustls，绕过 tonic + HTTP/2 framing
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12", "std"] }
+# crypto backend 切 aws-lc-rs（基于 BoringSSL，AES-NI 优化更好；rustls 默认 ring 单核 AES 慢 20-30%）
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "tls12", "std"] }
 rustls-pemfile = "2"
 prost = { workspace = true }
 # Phase 9c quic_tunnel：UDP 走 QUIC datagram 解决 UDP-over-TCP 丢包根因
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"] }
 bytes = "1"
