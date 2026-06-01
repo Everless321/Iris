@@ -160,11 +160,17 @@ do_install() {
     -d "{\"token\":\"$TOKEN\"}") \
     || die "enroll API 失败（token 已过期/已用/无效？或网络不通）"
 
-  local node_id master_grpc hint_addr
-  node_id=$(echo "$resp"     | parse_json node_id)
-  master_grpc=$(echo "$resp" | parse_json master_grpc)
-  hint_addr=$(echo "$resp"   | parse_json data_addr_hint)
+  local node_id hint_addr
+  node_id=$(echo "$resp"   | parse_json node_id)
+  hint_addr=$(echo "$resp" | parse_json data_addr_hint)
   [ -z "$DATA_ADDR" ] && DATA_ADDR="$hint_addr"
+
+  # 推导 master gRPC URL。enroll API 返回的 master_grpc 字段依赖 master 端
+  # IRIS_PUBLIC_GRPC env，未设时默认 127.0.0.1:7443，不可用。这里强制从 --master 参数
+  # 推导：取 host，加端口 7443（master gRPC 监听固定 7443）。
+  local master_host master_grpc
+  master_host=$(echo "$MASTER" | sed -E 's|^https?://||; s|:[0-9]+$||; s|/.*$||')
+  master_grpc="https://${master_host}:7443"
 
   echo "    节点 ID: $node_id"
   echo "    控制面: $master_grpc"
