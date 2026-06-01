@@ -1,101 +1,123 @@
 #!/usr/bin/env bash
-# Iris 节点一键安装脚本。
-#   curl -fsSL <MASTER>/install.sh | bash -s -- \
-#     --master https://<MASTER_HTTP> \
-#     --token <ENROLLMENT_TOKEN> \
-#     [--binary /path/to/iris-node] \
-#     [--install-dir /opt/iris] \
-#     [--data-addr 0.0.0.0:7444]
+# Iris 节点一键安装脚本 V2
+#
+# 安装新节点（首次）：
+#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- \
+#     --master https://<MASTER> --token <ENROLLMENT_TOKEN>
+#
+# 升级已有节点（替换 binary + 自动重启）：
+#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --upgrade
+#
+# 卸载节点（备份 + 移除）：
+#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --uninstall
+#
+# 可选：
+#   --binary <path>        本地二进制（跳过下载）
+#   --binary-url <url>     自定义下载 URL
+#   --release-tag <tag>    指定 GitHub Release（默认 latest）
+#   --install-dir <dir>    安装目录（默认 /opt/iris）
+#   --data-addr <addr>     数据面监听地址（默认从 enroll API 推断）
+#
 set -euo pipefail
 
+# ---- defaults ----
+RELEASE_REPO="${IRIS_RELEASE_REPO:-Everless321/Iris}"
+RELEASE_TAG="latest"
+INSTALL_DIR="/opt/iris"
+DATA_ADDR=""
 MASTER=""
 TOKEN=""
 BINARY=""
-INSTALL_DIR="/opt/iris"
-DATA_ADDR=""
+BINARY_URL=""
+ACTION="install"
 
+# ---- parse args ----
 while [ $# -gt 0 ]; do
   case "$1" in
-    --master)      MASTER="$2"; shift 2 ;;
-    --token)       TOKEN="$2"; shift 2 ;;
-    --binary)      BINARY="$2"; shift 2 ;;
-    --install-dir) INSTALL_DIR="$2"; shift 2 ;;
-    --data-addr)   DATA_ADDR="$2"; shift 2 ;;
-    *) echo "未知参数: $1" >&2; exit 1 ;;
+    --master)       MASTER="$2"; shift 2 ;;
+    --token)        TOKEN="$2"; shift 2 ;;
+    --binary)       BINARY="$2"; shift 2 ;;
+    --binary-url)   BINARY_URL="$2"; shift 2 ;;
+    --release-tag)  RELEASE_TAG="$2"; shift 2 ;;
+    --install-dir)  INSTALL_DIR="$2"; shift 2 ;;
+    --data-addr)    DATA_ADDR="$2"; shift 2 ;;
+    --upgrade)      ACTION="upgrade"; shift ;;
+    --uninstall)    ACTION="uninstall"; shift ;;
+    --help|-h)      sed -n '1,/^set/p' "$0" | head -n -1 | sed 's/^# \?//'; exit 0 ;;
+    *)              echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
 
-[ -z "$MASTER" ] && { echo "缺少 --master <http url>" >&2; exit 1; }
-[ -z "$TOKEN" ]  && { echo "缺少 --token <enrollment token>" >&2; exit 1; }
+# ---- helpers ----
+die()  { echo "❌ $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+ok()   { echo "✅ $*"; }
+warn() { echo "⚠️  $*" >&2; }
 
-command -v curl >/dev/null || { echo "需要 curl" >&2; exit 1; }
-command -v python3 >/dev/null || command -v jq >/dev/null || {
-  echo "需要 python3 或 jq 解析 JSON" >&2; exit 1; }
+# ---- root check (install/uninstall need /etc/systemd + /opt/iris) ----
+if [ "$(id -u)" -ne 0 ]; then
+  die "需要 root 权限：请用 sudo 运行（例如 curl ... | sudo bash -s -- ...）"
+fi
 
-echo "==> 向 master 兑换证书 ($MASTER)..."
-RESP=$(curl -fsS -X POST "$MASTER/api/nodes/enroll" \
-  -H 'content-type: application/json' \
-  -d "{\"token\":\"$TOKEN\"}")
+# ---- arch detection ----
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64) ARCH_TAG="musl-x86_64" ;;
+  *) die "暂不支持架构: $ARCH（目前仅 x86_64；aarch64 待支持）" ;;
+esac
 
-# 优先 jq，否则 python3
-parse() {
-  if command -v jq >/dev/null; then
-    echo "$RESP" | jq -r ".$1"
+# ---- deps ----
+command -v curl >/dev/null || die "需要 curl"
+command -v tar  >/dev/null || die "需要 tar"
+JSON_PARSER=""
+if command -v jq >/dev/null;      then JSON_PARSER="jq"
+elif command -v python3 >/dev/null; then JSON_PARSER="python3"
+else die "需要 jq 或 python3 解析 JSON"
+fi
+parse_json() {
+  if [ "$JSON_PARSER" = "jq" ]; then
+    jq -r ".$1"
   else
-    echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"
+    python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"
   fi
 }
 
-NODE_ID=$(parse node_id)
-MASTER_GRPC=$(parse master_grpc)
-HINT_ADDR=$(parse data_addr_hint)
-[ -z "$DATA_ADDR" ] && DATA_ADDR="$HINT_ADDR"
-echo "    节点 ID: $NODE_ID"
-echo "    控制面: $MASTER_GRPC"
-echo "    数据面监听: $DATA_ADDR"
+# ---- binary source resolution ----
+resolve_binary_url() {
+  if [ -n "$BINARY_URL" ]; then
+    echo "$BINARY_URL"
+  elif [ "$RELEASE_TAG" = "latest" ]; then
+    echo "https://github.com/${RELEASE_REPO}/releases/latest/download/iris-node-${ARCH_TAG}"
+  else
+    echo "https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}/iris-node-${ARCH_TAG}"
+  fi
+}
 
-CERT_DIR="$INSTALL_DIR/certs"
-echo "==> 写入证书到 $CERT_DIR"
-mkdir -p "$CERT_DIR" "$INSTALL_DIR/data"
-# 用 base64 中转避免 shell 转义问题
-for f in ca_pem cert_pem key_pem; do
-  case "$f" in
-    ca_pem)   OUT="ca.pem" ;;
-    cert_pem) OUT="client.pem" ;;
-    key_pem)  OUT="client-key.pem" ;;
-  esac
-  parse "$f" > "$CERT_DIR/$OUT"
-  chmod 600 "$CERT_DIR/$OUT"
-done
+download_binary() {
+  local target="$1"
+  if [ -n "$BINARY" ]; then
+    info "复制本地二进制 $BINARY → $target"
+    cp "$BINARY" "$target"
+  else
+    local url
+    url=$(resolve_binary_url)
+    info "下载二进制：$url"
+    if ! curl -fsSL --retry 3 --retry-delay 2 -o "$target" "$url"; then
+      rm -f "$target"
+      die "下载失败。如尚未发布 GitHub Release，请：(1) --binary <path> 用本地文件；(2) --binary-url <url> 自定义；(3) 联系维护者发布 release。"
+    fi
+  fi
+  [ -s "$target" ] || die "下载的二进制为空：$target"
+  chmod 755 "$target"
+}
 
-# 二进制：如果没显式提供，期望已在 PATH 或 INSTALL_DIR
-if [ -n "$BINARY" ]; then
-  echo "==> 复制二进制 $BINARY → $INSTALL_DIR/iris-node"
-  cp "$BINARY" "$INSTALL_DIR/iris-node"
-  chmod +x "$INSTALL_DIR/iris-node"
-elif [ -x "$INSTALL_DIR/iris-node" ]; then
-  echo "==> 检测到已存在 $INSTALL_DIR/iris-node"
-else
-  echo "⚠️  未提供 --binary，且 $INSTALL_DIR/iris-node 不存在"
-  echo "    请先把 iris-node 二进制放到 $INSTALL_DIR/，或重跑时加 --binary <路径>"
-  exit 1
-fi
-
-# 写一个简单的 env 文件
-cat > "$INSTALL_DIR/.env" <<EOF
-IRIS_NODE_ID=$NODE_ID
-IRIS_DATA_ADDR=$DATA_ADDR
-IRIS_CERT_DIR=$CERT_DIR
-IRIS_MASTER=$MASTER_GRPC
-EOF
-chmod 600 "$INSTALL_DIR/.env"
-
-# 检测 systemd 写 unit；否则给出手动启动命令
-if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
-  echo "==> 安装 systemd 服务 iris-node.service"
+# ---- systemd unit writer ----
+write_systemd_unit() {
+  local node_id="$1"
   cat > /etc/systemd/system/iris-node.service <<UNIT
 [Unit]
-Description=Iris Node ($NODE_ID)
+Description=Iris Node ($node_id)
+Documentation=https://github.com/$RELEASE_REPO
 After=network-online.target
 Wants=network-online.target
 
@@ -103,17 +125,149 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$INSTALL_DIR/iris-node
+WorkingDirectory=$INSTALL_DIR
+# cert 续签时节点 std::process::exit(0)，依赖 Restart=always 把它拉起来
 Restart=always
 RestartSec=3
-WorkingDirectory=$INSTALL_DIR
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now iris-node
-  echo "✅ 已启动。journalctl -u iris-node -f 看日志"
-else
-  echo "==> 无 systemd，手动启动："
-  echo "    cd $INSTALL_DIR && env \$(cat .env | xargs) ./iris-node"
-fi
+}
+
+# ---- action: install ----
+do_install() {
+  [ -z "$MASTER" ] && die "缺少 --master <http(s) url>"
+  [ -z "$TOKEN" ]  && die "缺少 --token <enrollment token>"
+
+  if [ -x "$INSTALL_DIR/iris-node" ]; then
+    warn "$INSTALL_DIR/iris-node 已存在。"
+    warn "升级请用：curl ... | sudo bash -s -- --upgrade"
+    warn "重装请先：curl ... | sudo bash -s -- --uninstall"
+    exit 1
+  fi
+
+  mkdir -p "$INSTALL_DIR/certs" "$INSTALL_DIR/data"
+
+  info "向 master 兑换证书 ($MASTER) ..."
+  local resp
+  resp=$(curl -fsS -X POST "$MASTER/api/nodes/enroll" \
+    -H 'content-type: application/json' \
+    -d "{\"token\":\"$TOKEN\"}") \
+    || die "enroll API 失败（token 已过期/已用/无效？或网络不通）"
+
+  local node_id master_grpc hint_addr
+  node_id=$(echo "$resp"     | parse_json node_id)
+  master_grpc=$(echo "$resp" | parse_json master_grpc)
+  hint_addr=$(echo "$resp"   | parse_json data_addr_hint)
+  [ -z "$DATA_ADDR" ] && DATA_ADDR="$hint_addr"
+
+  echo "    节点 ID: $node_id"
+  echo "    控制面: $master_grpc"
+  echo "    数据面监听: $DATA_ADDR"
+
+  info "写入证书 → $INSTALL_DIR/certs/"
+  echo "$resp" | parse_json ca_pem   > "$INSTALL_DIR/certs/ca.pem"
+  echo "$resp" | parse_json cert_pem > "$INSTALL_DIR/certs/client.pem"
+  echo "$resp" | parse_json key_pem  > "$INSTALL_DIR/certs/client-key.pem"
+  chmod 600 "$INSTALL_DIR/certs/ca.pem" "$INSTALL_DIR/certs/client.pem" "$INSTALL_DIR/certs/client-key.pem"
+  chmod 700 "$INSTALL_DIR/certs"
+
+  download_binary "$INSTALL_DIR/iris-node"
+
+  info "写入 $INSTALL_DIR/.env"
+  cat > "$INSTALL_DIR/.env" <<EOF
+IRIS_NODE_ID=$node_id
+IRIS_DATA_ADDR=$DATA_ADDR
+IRIS_CERT_DIR=$INSTALL_DIR/certs
+IRIS_MASTER=$master_grpc
+RUST_LOG=info
+EOF
+  chmod 600 "$INSTALL_DIR/.env"
+
+  if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
+    info "安装 systemd 服务 iris-node.service"
+    write_systemd_unit "$node_id"
+    systemctl enable --now iris-node.service
+    sleep 2
+    if systemctl is-active --quiet iris-node.service; then
+      ok "节点已上线。journalctl -u iris-node -f 看实时日志"
+      ok "Cert 1 年到期前 30 天自动续签（IRIS_AUTO_RENEW=0 可关闭）"
+    else
+      die "服务启动失败：journalctl -u iris-node --no-pager -n 30 查错"
+    fi
+  else
+    warn "无 systemd，手动启动："
+    echo "    cd $INSTALL_DIR && env \$(cat .env | xargs) ./iris-node"
+  fi
+}
+
+# ---- action: upgrade ----
+do_upgrade() {
+  [ -x "$INSTALL_DIR/iris-node" ] \
+    || die "未检测到已安装节点（$INSTALL_DIR/iris-node 不存在）。先做首次安装"
+
+  local ts backup
+  ts=$(date +%s)
+  backup="$INSTALL_DIR/iris-node.bak.$ts"
+  info "备份当前二进制 → $backup"
+  cp "$INSTALL_DIR/iris-node" "$backup"
+
+  download_binary "$INSTALL_DIR/iris-node.new"
+  mv "$INSTALL_DIR/iris-node.new" "$INSTALL_DIR/iris-node"
+
+  if command -v systemctl >/dev/null && systemctl is-active --quiet iris-node.service; then
+    info "systemctl restart iris-node.service"
+    systemctl restart iris-node.service
+    sleep 2
+    if systemctl is-active --quiet iris-node.service; then
+      ok "升级完成"
+    else
+      warn "重启后服务异常，回滚二进制"
+      mv "$backup" "$INSTALL_DIR/iris-node"
+      systemctl restart iris-node.service
+      die "已回滚。journalctl -u iris-node --no-pager -n 30 查错"
+    fi
+  else
+    warn "服务未运行，已替换二进制。手动启动 systemctl start iris-node"
+  fi
+}
+
+# ---- action: uninstall ----
+do_uninstall() {
+  if [ ! -d "$INSTALL_DIR" ]; then
+    warn "$INSTALL_DIR 不存在，无需卸载"
+    exit 0
+  fi
+
+  if command -v systemctl >/dev/null && systemctl list-unit-files iris-node.service >/dev/null 2>&1; then
+    info "停 + 禁用 systemd 服务"
+    systemctl stop iris-node.service 2>/dev/null || true
+    systemctl disable iris-node.service 2>/dev/null || true
+    rm -f /etc/systemd/system/iris-node.service
+    systemctl daemon-reload
+  fi
+
+  local ts backup
+  ts=$(date +%Y%m%d-%H%M%S)
+  backup="/tmp/iris-uninstall-$ts.tar.gz"
+  info "打包 $INSTALL_DIR → $backup（含 cert + 配置，保留备查）"
+  tar -czf "$backup" -C "$(dirname "$INSTALL_DIR")" "$(basename "$INSTALL_DIR")" 2>/dev/null \
+    || warn "打包失败但继续卸载"
+
+  info "删除 $INSTALL_DIR"
+  rm -rf "$INSTALL_DIR"
+
+  ok "卸载完成。备份保留在 $backup（如确认无需，可手动 rm）"
+}
+
+# ---- dispatch ----
+case "$ACTION" in
+  install)   do_install ;;
+  upgrade)   do_upgrade ;;
+  uninstall) do_uninstall ;;
+esac
