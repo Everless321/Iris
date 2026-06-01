@@ -66,6 +66,12 @@ export default function Forwards() {
       render: (_, f) => <ListenerBadge f={f} />,
     },
     {
+      title: "流量",
+      key: "traffic",
+      width: 170,
+      render: (_, f) => <TrafficCell f={f} />,
+    },
+    {
       title: "目标",
       key: "targets",
       width: 220,
@@ -140,6 +146,41 @@ export default function Forwards() {
         />
       </Card>
     </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let v = n / 1024;
+  for (const u of units) {
+    if (v < 1024) return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${u}`;
+    v /= 1024;
+  }
+  return `${v.toFixed(2)} EB`;
+}
+
+function TrafficCell({ f }: { f: Forward }) {
+  const bin = f.bytes_in ?? 0;
+  const bout = f.bytes_out ?? 0;
+  if (bin === 0 && bout === 0) {
+    return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+  }
+  return (
+    <Tooltip
+      title={
+        <div style={{ fontSize: 12, fontFamily: "monospace" }}>
+          <div>↑ 上行: {bin.toLocaleString()} B</div>
+          <div>↓ 下行: {bout.toLocaleString()} B</div>
+          <div style={{ marginTop: 4, color: "#999" }}>合计: {(bin + bout).toLocaleString()} B</div>
+        </div>
+      }
+    >
+      <Space size={4} direction="vertical" style={{ fontSize: 11, cursor: "help" }}>
+        <Text className="num" style={{ fontSize: 11 }}>↑ {formatBytes(bin)}</Text>
+        <Text className="num" type="secondary" style={{ fontSize: 11 }}>↓ {formatBytes(bout)}</Text>
+      </Space>
+    </Tooltip>
   );
 }
 

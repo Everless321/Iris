@@ -396,17 +396,22 @@ pub async fn open_next_hop(
 }
 
 /// 入口反向 recv：从 QUIC datagram 读 → 主 UDP socket send_to(src)。
+/// traffic.add_out 在 send_to 成功后累加 (下行字节)。
 pub async fn udp_recv_loop(
     conn: quinn::Connection,
     sock: Arc<UdpSocket>,
     src: SocketAddr,
     last_seen: Arc<std::sync::atomic::AtomicI64>,
+    traffic: Arc<crate::dataplane::TrafficCounter>,
 ) {
     loop {
         match conn.read_datagram().await {
             Ok(b) if !b.is_empty() => {
                 last_seen.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                let _ = sock.send_to(&b, src).await;
+                let n = b.len();
+                if sock.send_to(&b, src).await.is_ok() {
+                    traffic.add_out(n);
+                }
             }
             Ok(_) => continue,
             Err(_) => break,

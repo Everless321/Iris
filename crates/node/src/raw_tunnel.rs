@@ -16,7 +16,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter};
+use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter, TrafficCounter};
 use crate::lb::{LoadBalancer, NodeView};
 use crate::sock;
 use iris_proto::control::{Hop, TargetEndpoint, TunnelHeader};
@@ -384,21 +384,24 @@ async fn try_open(
 
 // ============================== Entry helpers ==============================
 
-/// TCP 入口连接 → raw tunnel 桥接。
+/// TCP 入口连接 → raw tunnel 桥接。traffic 由入口节点的 ActiveForward 共享 (仅入口统计)。
 pub async fn handle_entry_tcp(
     inbound: TcpStream,
     nr: ReadHalf<ClientTlsStream<TcpStream>>,
     nw: WriteHalf<ClientTlsStream<TcpStream>>,
+    traffic: Arc<TrafficCounter>,
 ) {
     let (mut ir, mut iw) = inbound.into_split();
     let mut nr = nr;
     let mut nw = nw;
+    let traffic_up = traffic.clone();
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; BUF];
         loop {
             match ir.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    traffic_up.add_in(n);
                     if write_frame(&mut nw, &buf[..n]).await.is_err() {
                         break;
                     }
@@ -406,13 +409,16 @@ pub async fn handle_entry_tcp(
             }
         }
     });
+    let traffic_dn = traffic;
     let down = tokio::spawn(async move {
         loop {
             match read_frame(&mut nr, MAX_FRAME).await {
                 Ok(Some(data)) => {
+                    let n = data.len();
                     if iw.write_all(&data).await.is_err() {
                         break;
                     }
+                    traffic_dn.add_out(n);
                 }
                 _ => break,
             }
