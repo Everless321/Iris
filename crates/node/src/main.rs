@@ -279,12 +279,15 @@ fn reconcile_forwards(
             continue;
         }
 
-        // 已激活 + rule 完全相同 → 复用
+        // 已激活 + rule 完全相同 + 上次 spawn 成功 → 复用。
+        // probe_bind 失败时 spawn_forward 返回 status.ok=false + handles=empty，
+        // 此时即使 rule 不变也要重试（master 重启 reconcile 触发 EADDRINUSE 后
+        // port 短期被占后释放，下轮 reconcile 应该再试）。
         if let Some(existing) = active.get(&fid) {
-            if existing.rule == *f {
+            if existing.rule == *f && existing.status.ok {
                 continue;
             }
-            // 字段变了 → 重启
+            // rule 变化 OR 上次 probe_bind 失败 → 重启 / 重试
             if let Some(af) = active.remove(&fid) {
                 for h in &af.handles {
                     h.abort();
@@ -293,7 +296,8 @@ fn reconcile_forwards(
                     forward_id = fid,
                     old_port = af.rule.listen_port,
                     new_port = f.listen_port,
-                    "forward changed: restarting listener"
+                    prev_ok = af.status.ok,
+                    "forward changed or prev spawn failed: restarting listener"
                 );
             }
         }
