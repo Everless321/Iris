@@ -87,6 +87,11 @@ pub struct ForwardRow {
     pub owner_id: i64,
     #[sqlx(default)]
     pub target_strategy: String,
+    /// migration 0008：累计上行（客户端→入口）字节数。i64 由 SQLite 限制，u64 上限够用。
+    #[sqlx(default)]
+    pub bytes_in: i64,
+    #[sqlx(default)]
+    pub bytes_out: i64,
 }
 
 impl ForwardRow {
@@ -143,6 +148,11 @@ pub struct Forward {
     /// 或者该 forward 不是入口（已被 master sync_config 过滤）
     #[serde(default)]
     pub listener_status: Vec<ListenerNodeStatus>,
+    /// 累计流量（自 forward 创建以来）。bytes_in = 上行，bytes_out = 下行。
+    #[serde(default)]
+    pub bytes_in: i64,
+    #[serde(default)]
+    pub bytes_out: i64,
 }
 
 /// 单个入口节点的 listener 状态。前端 forward list 显示徽章 + tooltip。
@@ -175,6 +185,8 @@ impl From<ForwardRow> for Forward {
             created_at: r.created_at,
             owner_id: r.owner_id,
             listener_status: Vec::new(),
+            bytes_in: r.bytes_in,
+            bytes_out: r.bytes_out,
         }
     }
 }

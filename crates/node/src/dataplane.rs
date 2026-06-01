@@ -3,11 +3,30 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
+/// 单条 forward 的字节流计数器（仅入口节点累计）。
+/// bytes_in = 客户端→入口（上行）；bytes_out = 入口→客户端（下行）。
+/// 用 AtomicU64 + Relaxed：单次 fetch_add ~5ns，9Gbps 路径无感知。
+#[derive(Default, Debug)]
+pub struct TrafficCounter {
+    pub bytes_in: AtomicU64,
+    pub bytes_out: AtomicU64,
+}
+impl TrafficCounter {
+    #[inline]
+    pub fn add_in(&self, n: usize) {
+        self.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn add_out(&self, n: usize) {
+        self.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
 
 use crate::sock;
 use tokio_stream::wrappers::ReceiverStream;
@@ -263,6 +282,7 @@ pub async fn run_multi_hop_entry(
     target_strategy: String,
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
+    traffic: Arc<TrafficCounter>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
     let l = sock::tcp_listen(bind_addr)?;
@@ -279,15 +299,16 @@ pub async fn run_multi_hop_entry(
         sock::tune_accepted(&inbound);
         let hops_rest = hops[1..].to_vec();
         let client_ip = peer.ip().to_string();
-        let (targets, strategy, ctx, lb) = (
+        let (targets, strategy, ctx, lb, traffic) = (
             targets.clone(),
             target_strategy.clone(),
             ctx.clone(),
             lb.clone(),
+            traffic.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = handle_entry_conn(
-                inbound, hops_rest, &targets, &strategy, &client_ip, forward_id, &ctx, &lb,
+                inbound, hops_rest, &targets, &strategy, &client_ip, forward_id, &ctx, &lb, &traffic,
             )
             .await
             {
@@ -297,6 +318,7 @@ pub async fn run_multi_hop_entry(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_entry_conn(
     inbound: TcpStream,
     hops_rest: Vec<Hop>,
@@ -306,6 +328,7 @@ async fn handle_entry_conn(
     forward_id: i64,
     ctx: &NodeCtx,
     lb: &LoadBalancer,
+    traffic: &Arc<TrafficCounter>,
 ) -> Result<()> {
     let view = ctx.view();
     if std::env::var("IRIS_DISABLE_RAW").as_deref() == Ok("1") {
@@ -315,7 +338,7 @@ async fn handle_entry_conn(
         )
         .await?;
         let _g = guard;
-        bridge_tcp(inbound, resp, req_tx).await;
+        bridge_tcp(inbound, resp, req_tx, traffic.clone()).await;
     } else {
         // Phase 9a: 走 raw_tunnel（去 HTTP/2 framing）
         let (nr, nw) = crate::raw_tunnel::open_next_hop(
@@ -323,14 +346,21 @@ async fn handle_entry_conn(
             forward_id, 1, "", &view, ctx.raw_connector.clone(),
         )
         .await?;
-        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw).await;
+        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw, traffic.clone()).await;
     }
     Ok(())
 }
 
 /// 桥接 client TCP <-> 下游隧道流。
-async fn bridge_tcp(inbound: TcpStream, mut resp: Streaming<Chunk>, req_tx: mpsc::Sender<Chunk>) {
+async fn bridge_tcp(
+    inbound: TcpStream,
+    mut resp: Streaming<Chunk>,
+    req_tx: mpsc::Sender<Chunk>,
+    traffic: Arc<TrafficCounter>,
+) {
     let (mut tr, mut tw) = inbound.into_split();
+    let traffic_up = traffic.clone();
+    let traffic_dn = traffic;
     tokio::select! {
         _ = async {
             let mut buf = vec![0u8; BUF];
@@ -338,6 +368,7 @@ async fn bridge_tcp(inbound: TcpStream, mut resp: Streaming<Chunk>, req_tx: mpsc
                 match tr.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        traffic_up.add_in(n);
                         if req_tx.send(Chunk { header: None, data: buf[..n].to_vec() }).await.is_err() {
                             break;
                         }
@@ -347,9 +378,11 @@ async fn bridge_tcp(inbound: TcpStream, mut resp: Streaming<Chunk>, req_tx: mpsc
         } => {}
         _ = async {
             while let Ok(Some(c)) = resp.message().await {
+                let n = c.data.len();
                 if tw.write_all(&c.data).await.is_err() {
                     break;
                 }
+                traffic_dn.add_out(n);
             }
         } => {}
     }

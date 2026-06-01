@@ -86,6 +86,8 @@ export type Forward = {
   enabled: boolean;
   created_at: number;
   listener_status?: ListenerNodeStatus[];
+  bytes_in?: number;
+  bytes_out?: number;
 };
 export type Enrollment = {
   token: string;

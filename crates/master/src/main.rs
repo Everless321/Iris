@@ -35,6 +35,11 @@ pub struct ListenerStateEntry {
     pub updated_at: i64,
 }
 
+/// 跟踪每 (node_id, forward_id) 上次心跳上报的 traffic 累计值。
+/// 用于计算 delta = current - last（node 重启时 current<last 则 delta=current）。
+/// master 重启会清空，第一轮心跳起始值即为 last，下一轮才开始算 delta（少计一轮，可接受）。
+pub type TrafficLastView = Arc<RwLock<HashMap<(String, i64), (u64, u64)>>>;
+
 fn grpc_addr() -> String {
     std::env::var("IRIS_LISTEN").unwrap_or_else(|_| "0.0.0.0:7443".into())
 }
@@ -79,6 +84,7 @@ fn now_ms() -> u64 {
 struct ControlSvc {
     pool: SqlitePool,
     listener_states: ListenerStateView,
+    traffic_last: TrafficLastView,
 }
 
 #[tonic::async_trait]
@@ -123,6 +129,33 @@ impl Control for ControlSvc {
                         updated_at: now,
                     },
                 );
+            }
+        }
+        // 流量 delta 累加到 forwards 表。current<last 视作 node 重启 → delta=current。
+        // node 多入口 (LB 同一 forward 多节点 entry) → 各节点独立 last，加和累计无重复。
+        if !r.traffic_stats.is_empty() {
+            let mut deltas: Vec<(i64, u64, u64)> = Vec::with_capacity(r.traffic_stats.len());
+            {
+                let mut g = self.traffic_last.write().unwrap();
+                for s in &r.traffic_stats {
+                    let key = (r.node_id.clone(), s.forward_id);
+                    let (last_in, last_out) = g.get(&key).copied().unwrap_or((0, 0));
+                    let din = if s.bytes_in >= last_in { s.bytes_in - last_in } else { s.bytes_in };
+                    let dout = if s.bytes_out >= last_out { s.bytes_out - last_out } else { s.bytes_out };
+                    g.insert(key, (s.bytes_in, s.bytes_out));
+                    if din > 0 || dout > 0 {
+                        deltas.push((s.forward_id, din, dout));
+                    }
+                }
+            }
+            for (fid, din, dout) in deltas {
+                if let Err(e) = sqlx::query(
+                    "UPDATE forwards SET bytes_in = bytes_in + ?, bytes_out = bytes_out + ? WHERE id = ?",
+                )
+                .bind(din as i64).bind(dout as i64).bind(fid)
+                .execute(&self.pool).await {
+                    tracing::warn!(forward_id = fid, error = %e, "traffic delta UPDATE failed");
+                }
             }
         }
         Ok(Response::new(HeartbeatReply {
@@ -262,6 +295,8 @@ async fn main() -> Result<()> {
 
     // listener 状态共享视图：heartbeat 写 / API 读
     let listener_states: ListenerStateView = Arc::new(RwLock::new(HashMap::new()));
+    // 流量 last_reported 视图：仅 heartbeat 内部使用（不需要 API 暴露）
+    let traffic_last: TrafficLastView = Arc::new(RwLock::new(HashMap::new()));
 
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
@@ -299,7 +334,11 @@ async fn main() -> Result<()> {
     let tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(client_ca);
-    let svc = ControlSvc { pool, listener_states: listener_states.clone() };
+    let svc = ControlSvc {
+        pool,
+        listener_states: listener_states.clone(),
+        traffic_last,
+    };
     let addr = grpc_addr().parse()?;
     tracing::info!(%addr, "grpc control listening (mTLS)");
 

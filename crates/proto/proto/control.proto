@@ -15,6 +15,10 @@ message HeartbeatRequest {
   // 本节点当前所有入口 forward 的 listener 实际状态。空 = 不是入口节点
   // 或者本周期未上报（向后兼容 — master 收到空时不更新已存视图）。
   repeated ListenerState listener_states = 4;
+  // 仅入口节点统计：每条 forward 自 node 启动以来的累计字节数。
+  // master 用 delta = current - last_reported 累加到持久化列；node 重启后 current 重置为 0,
+  // master 检测到 current < last 时把 delta 设为 current（视作新 epoch）。
+  repeated TrafficStat traffic_stats = 5;
 }
 message HeartbeatReply {
   uint64 server_time = 1;
@@ -30,6 +34,15 @@ message ListenerState {
   string protocol = 3; // tcp | udp | tcp+udp
   bool ok = 4;
   string error = 5;    // ok=false 时填错误原因 (EADDRINUSE / Permission denied 等)
+}
+
+// 单条 forward 的流量累计（自 node 启动以来）。
+// bytes_in = 入口节点 accept 的客户端 → 转发链路（上行 = 客户端发出）
+// bytes_out = 转发链路 → 写回客户端（下行 = 客户端收到）
+message TrafficStat {
+  int64 forward_id = 1;
+  uint64 bytes_in = 2;
+  uint64 bytes_out = 3;
 }
 
 message SyncRequest {

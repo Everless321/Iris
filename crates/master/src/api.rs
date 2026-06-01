@@ -393,7 +393,8 @@ async fn create_forward(
         id, name: f.name, listen_port: f.listen_port, protocol,
         hops, targets, target_strategy: f.target_strategy,
         enabled: true, created_at: now, owner_id: claims.sub,
-        listener_status: Vec::new(), // 刚创建,还未收到 heartbeat
+        listener_status: Vec::new(),
+        bytes_in: 0, bytes_out: 0,
     }))
 }
 
@@ -678,6 +679,19 @@ async fn metrics(State(s): State<AppState>) -> Result<String, ApiErr> {
     let online = nodes.iter().filter(|n| n.health == "healthy").count();
     o.push_str(&format!("# HELP iris_nodes_online 在线节点数\n# TYPE iris_nodes_online gauge\niris_nodes_online {online}\n"));
     o.push_str(&format!("# HELP iris_nodes_total 节点总数\n# TYPE iris_nodes_total gauge\niris_nodes_total {}\n", nodes.len()));
+    // forward 累计流量（counter，重启不归零 = 持久化在 DB）
+    let fwds = sqlx::query_as::<_, ForwardRow>("SELECT * FROM forwards")
+        .fetch_all(&s.pool).await.map_err(err)?;
+    o.push_str("# HELP iris_forward_bytes_in_total 转发上行累计字节（客户端→入口）\n# TYPE iris_forward_bytes_in_total counter\n");
+    for f in &fwds {
+        o.push_str(&format!("iris_forward_bytes_in_total{{id=\"{}\",name=\"{}\",port=\"{}\"}} {}\n",
+            f.id, esc(&f.name), f.listen_port, f.bytes_in));
+    }
+    o.push_str("# HELP iris_forward_bytes_out_total 转发下行累计字节（入口→客户端）\n# TYPE iris_forward_bytes_out_total counter\n");
+    for f in &fwds {
+        o.push_str(&format!("iris_forward_bytes_out_total{{id=\"{}\",name=\"{}\",port=\"{}\"}} {}\n",
+            f.id, esc(&f.name), f.listen_port, f.bytes_out));
+    }
     Ok(o)
 }
 

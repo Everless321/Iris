@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
-use crate::dataplane::{NodeCtx, TargetRouter, UDP_BUF};
+use crate::dataplane::{NodeCtx, TargetRouter, TrafficCounter, UDP_BUF};
 use crate::lb::LoadBalancer;
 use crate::quic_tunnel;
 use crate::sock;
@@ -63,6 +63,7 @@ pub async fn run_udp_single_hop(
     targets: Vec<TargetEndpoint>,
     target_strategy: String,
     target_router: Arc<TargetRouter>,
+    traffic: Arc<TrafficCounter>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
     let sock = Arc::new(sock::udp_bind(bind_addr)?);
@@ -86,6 +87,7 @@ pub async fn run_udp_single_hop(
                 continue;
             }
         };
+        traffic.add_in(n);
         let data = buf[..n].to_vec();
 
         // 命中复用
@@ -123,8 +125,9 @@ pub async fn run_udp_single_hop(
         });
         map.write().await.insert(src, session.clone());
         {
-            let (sock_back, out_back, map_back, sess_back, src_back) =
-                (sock.clone(), out.clone(), map.clone(), session.clone(), src);
+            let (sock_back, out_back, map_back, sess_back, src_back, traffic_back) = (
+                sock.clone(), out.clone(), map.clone(), session.clone(), src, traffic.clone(),
+            );
             tokio::spawn(async move {
                 let mut buf = vec![0u8; UDP_BUF];
                 loop {
@@ -134,6 +137,7 @@ pub async fn run_udp_single_hop(
                             if sock_back.send_to(&buf[..n], src_back).await.is_err() {
                                 break;
                             }
+                            traffic_back.add_out(n);
                         }
                         Ok(_) => break,
                         Err(_) => {
@@ -192,6 +196,7 @@ pub async fn run_udp_multi_hop(
     target_strategy: String,
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
+    traffic: Arc<TrafficCounter>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
     let sock = Arc::new(sock::udp_bind(bind_addr)?);
@@ -214,6 +219,7 @@ pub async fn run_udp_multi_hop(
                 continue;
             }
         };
+        traffic.add_in(n);
         let data = buf[..n].to_vec();
 
         // 命中复用
@@ -253,10 +259,10 @@ pub async fn run_udp_multi_hop(
         });
         map.write().await.insert(src, session);
         {
-            let (sock_back, map_back, src_back, ls, c) =
-                (sock.clone(), map.clone(), src, last_seen.clone(), conn.clone());
+            let (sock_back, map_back, src_back, ls, c, traffic_back) =
+                (sock.clone(), map.clone(), src, last_seen.clone(), conn.clone(), traffic.clone());
             tokio::spawn(async move {
-                quic_tunnel::udp_recv_loop(c, sock_back, src_back, ls).await;
+                quic_tunnel::udp_recv_loop(c, sock_back, src_back, ls, traffic_back).await;
                 map_back.write().await.remove(&src_back);
             });
         }

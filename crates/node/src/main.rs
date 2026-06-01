@@ -20,15 +20,19 @@ use tonic::transport::{
 };
 use iris_proto::control::control_client::ControlClient;
 use iris_proto::control::data_plane_server::DataPlaneServer;
-use iris_proto::control::{ForwardRule, HeartbeatRequest, ListenerState, NodeAddr, SyncRequest};
+use iris_proto::control::{
+    ForwardRule, HeartbeatRequest, ListenerState, NodeAddr, SyncRequest, TrafficStat,
+};
 
 /// 一条已激活 forward 的句柄：rule 全量快照（用于 diff 判定是否需要重启），
 /// handles 持 TCP/UDP listener task 的 JoinHandle（abort 即可关闭 listener + 释放端口）。
 /// status 是 spawn 时预先 probe bind 的结果，heartbeat 时上报给 master。
+/// traffic 是字节流计数器（仅入口节点累计），与 listener task 共享。
 struct ActiveForward {
     rule: ForwardRule,
     handles: Vec<JoinHandle<()>>,
     status: ListenerState,
+    traffic: Arc<dataplane::TrafficCounter>,
 }
 
 /// probe 一个端口能否在所有协议上 bind。成功立即 drop 释放端口，失败返回错误描述。
@@ -97,6 +101,7 @@ fn spawn_forward(
     let port = f.listen_port as u16;
     let fid = f.id;
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    let traffic = Arc::new(dataplane::TrafficCounter::default());
 
     // 预先 probe bind：能 bind 就 spawn 实际 task；失败则不 spawn，仅记 status 上报 master。
     // 失败常见原因：EADDRINUSE (OS 层端口被其他进程占)、Permission denied (port<1024 非 root)。
@@ -112,28 +117,30 @@ fn spawn_forward(
                 ok: false,
                 error: reason,
             },
+            traffic,
         });
     }
 
     if has_tcp {
         if f.hops.len() == 1 {
-            let (t, s) = (targets.clone(), target_strategy.clone());
+            let (t, s, tc) = (targets.clone(), target_strategy.clone(), traffic.clone());
             handles.push(tokio::spawn(async move {
-                if let Err(e) = forward::run_single_hop(port, fid, t, s).await {
+                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc).await {
                     tracing::error!(error = %e, "tcp single-hop entry exited");
                 }
             }));
         } else {
-            let (hops, t, s, ctx2, lb2) = (
+            let (hops, t, s, ctx2, lb2, tc) = (
                 f.hops.clone(),
                 targets.clone(),
                 target_strategy.clone(),
                 ctx.clone(),
                 lb.clone(),
+                traffic.clone(),
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2).await
+                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc).await
                 {
                     tracing::error!(error = %e, "tcp multi-hop entry exited");
                 }
@@ -142,27 +149,29 @@ fn spawn_forward(
     }
     if has_udp {
         if f.hops.len() == 1 {
-            let (t, s, tr) = (
+            let (t, s, tr, tc) = (
                 targets.clone(),
                 target_strategy.clone(),
                 target_router.clone(),
+                traffic.clone(),
             );
             handles.push(tokio::spawn(async move {
-                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr).await {
+                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr, tc).await {
                     tracing::error!(error = %e, "udp single-hop entry exited");
                 }
             }));
         } else {
-            let (hops, t, s, ctx2, lb2) = (
+            let (hops, t, s, ctx2, lb2, tc) = (
                 f.hops.clone(),
                 targets.clone(),
                 target_strategy.clone(),
                 ctx.clone(),
                 lb.clone(),
+                traffic.clone(),
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2).await
+                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2, tc).await
                 {
                     tracing::error!(error = %e, "udp multi-hop entry exited");
                 }
@@ -180,12 +189,27 @@ fn spawn_forward(
             ok: true,
             error: String::new(),
         },
+        traffic,
     })
 }
 
 /// 收集 active_forwards 状态用于 heartbeat 上报。
 fn collect_listener_states(active: &HashMap<i64, ActiveForward>) -> Vec<ListenerState> {
     active.values().map(|af| af.status.clone()).collect()
+}
+
+/// 收集 active_forwards 流量计数器快照。bytes_in/out 是自 node 启动以来累计；
+/// node 重启会归零，master 检测到 current < last 时把 delta 设为 current（视作新 epoch）。
+fn collect_traffic_stats(active: &HashMap<i64, ActiveForward>) -> Vec<TrafficStat> {
+    use std::sync::atomic::Ordering;
+    active
+        .iter()
+        .map(|(fid, af)| TrafficStat {
+            forward_id: *fid,
+            bytes_in: af.traffic.bytes_in.load(Ordering::Relaxed),
+            bytes_out: af.traffic.bytes_out.load(Ordering::Relaxed),
+        })
+        .collect()
 }
 
 /// 心跳循环每次 sync_config 后调用：对比新 forwards vs 当前 active，启停 listener。
@@ -441,12 +465,14 @@ async fn main() -> Result<()> {
         tick.tick().await;
         seq += 1;
         let listener_states = collect_listener_states(&active_forwards);
+        let traffic_stats = collect_traffic_stats(&active_forwards);
         if let Err(e) = client
             .heartbeat(HeartbeatRequest {
                 node_id: node_id.clone(),
                 seq,
                 load: 0.0,
                 listener_states,
+                traffic_stats,
             })
             .await
         {
