@@ -64,9 +64,20 @@ pub async fn run_udp_single_hop(
     target_strategy: String,
     target_router: Arc<TargetRouter>,
     traffic: Arc<TrafficCounter>,
+    bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
-    let sock = Arc::new(sock::udp_bind(bind_addr)?);
+    let sock = match sock::udp_bind(bind_addr) {
+        Ok(s) => {
+            let _ = bind_result.send(Ok(()));
+            Arc::new(s)
+        }
+        Err(e) => {
+            let msg = format!("udp bind {listen_port}: {e}");
+            let _ = bind_result.send(Err(msg.clone()));
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
     tracing::info!(
         listen_port,
         targets = targets.len(),
@@ -197,9 +208,20 @@ pub async fn run_udp_multi_hop(
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
     traffic: Arc<TrafficCounter>,
+    bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
-    let sock = Arc::new(sock::udp_bind(bind_addr)?);
+    let sock = match sock::udp_bind(bind_addr) {
+        Ok(s) => {
+            let _ = bind_result.send(Ok(()));
+            Arc::new(s)
+        }
+        Err(e) => {
+            let msg = format!("udp bind {listen_port}: {e}");
+            let _ = bind_result.send(Err(msg.clone()));
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
     tracing::info!(
         listen_port,
         hops = hops.len(),

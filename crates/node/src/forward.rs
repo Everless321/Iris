@@ -21,9 +21,20 @@ pub async fn run_single_hop(
     traffic: Arc<TrafficCounter>,
     sessions: Arc<SessionTable>,
     entry_node_id: Arc<String>,
+    bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
-    let l = sock::tcp_listen(bind_addr)?;
+    let l = match sock::tcp_listen(bind_addr) {
+        Ok(l) => {
+            let _ = bind_result.send(Ok(()));
+            l
+        }
+        Err(e) => {
+            let msg = format!("tcp bind {listen_port}: {e}");
+            let _ = bind_result.send(Err(msg.clone()));
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
     tracing::info!(
         listen_port,
         targets = targets.len(),

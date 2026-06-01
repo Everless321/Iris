@@ -38,25 +38,22 @@ struct ActiveForward {
     traffic: Arc<dataplane::TrafficCounter>,
 }
 
-/// probe 一个端口能否在所有协议上 bind。成功立即 drop 释放端口，失败返回错误描述。
-/// TOCTOU 窗口 ~1ms（probe 后 drop → 实际 spawn 内 bind），SO_REUSEADDR 已开避免冲突。
-fn probe_bind(port: u16, has_tcp: bool, has_udp: bool) -> Result<(), String> {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
-    if has_tcp {
-        sock::tcp_listen(addr)
-            .map_err(|e| format!("tcp bind {port}: {e}"))?;
+/// listener task 内 bind 完成后,通过 oneshot 把 bind 结果上报给 spawn_forward，
+/// 这样 master/UI 看到的 status.ok 是真实 bind 结果（不再依赖前置 probe）。
+/// 1s timeout 是保险阀（正常 bind 在 ms 级；超时基本意味着 task 没启或卡在前置 await）。
+async fn await_bind(rx: tokio::sync::oneshot::Receiver<Result<(), String>>) -> Result<(), String> {
+    match tokio::time::timeout(Duration::from_secs(1), rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("bind result channel closed (task panicked?)".to_string()),
+        Err(_) => Err("bind timed out (>1s)".to_string()),
     }
-    if has_udp {
-        sock::udp_bind(addr)
-            .map_err(|e| format!("udp bind {port}: {e}"))?;
-    }
-    Ok(())
 }
 
 /// 按 ForwardRule 启动 TCP/UDP listener task，返回 ActiveForward（含 abort handles）。
 /// 仅当本节点是 hops[0]（入口）且 targets 非空时启动；否则返回 None。
-fn spawn_forward(
+///
+/// async：spawn 后通过 oneshot 等真实 bind 结果回报，status.ok 反映实际 bind 成败。
+async fn spawn_forward(
     f: &ForwardRule,
     node_id: &str,
     ctx: &Arc<NodeCtx>,
@@ -106,27 +103,12 @@ fn spawn_forward(
     let port = f.listen_port as u16;
     let fid = f.id;
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    let mut bind_rxs: Vec<tokio::sync::oneshot::Receiver<Result<(), String>>> = Vec::new();
     let traffic = Arc::new(dataplane::TrafficCounter::default());
 
-    // 预先 probe bind：能 bind 就 spawn 实际 task；失败则不 spawn，仅记 status 上报 master。
-    // 失败常见原因：EADDRINUSE (OS 层端口被其他进程占)、Permission denied (port<1024 非 root)。
-    if let Err(reason) = probe_bind(port, has_tcp, has_udp) {
-        tracing::warn!(forward_id = fid, port, %reason, "listener probe bind failed; not spawning");
-        return Some(ActiveForward {
-            rule: f.clone(),
-            handles,
-            status: ListenerState {
-                forward_id: fid,
-                port: port as u32,
-                protocol: f.protocol.clone(),
-                ok: false,
-                error: reason,
-            },
-            traffic,
-        });
-    }
-
     if has_tcp {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        bind_rxs.push(rx);
         if f.hops.len() == 1 {
             let (t, s, tc, ss, ent) = (
                 targets.clone(),
@@ -136,7 +118,7 @@ fn spawn_forward(
                 entry_node_id_arc.clone(),
             );
             handles.push(tokio::spawn(async move {
-                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc, ss, ent).await {
+                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc, ss, ent, tx).await {
                     tracing::error!(error = %e, "tcp single-hop entry exited");
                 }
             }));
@@ -153,7 +135,7 @@ fn spawn_forward(
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent).await
+                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent, tx).await
                 {
                     tracing::error!(error = %e, "tcp multi-hop entry exited");
                 }
@@ -161,6 +143,8 @@ fn spawn_forward(
         }
     }
     if has_udp {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        bind_rxs.push(rx);
         if f.hops.len() == 1 {
             let (t, s, tr, tc) = (
                 targets.clone(),
@@ -169,7 +153,7 @@ fn spawn_forward(
                 traffic.clone(),
             );
             handles.push(tokio::spawn(async move {
-                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr, tc).await {
+                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr, tc, tx).await {
                     tracing::error!(error = %e, "udp single-hop entry exited");
                 }
             }));
@@ -184,12 +168,46 @@ fn spawn_forward(
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2, tc).await
+                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2, tc, tx).await
                 {
                     tracing::error!(error = %e, "udp multi-hop entry exited");
                 }
             }));
         }
+    }
+
+    // 收齐所有 listener 的真实 bind 结果。任意一个失败 → status.ok=false +
+    // abort 已起的 task 释放占用的端口，避免 zombie listener。
+    let mut all_ok = true;
+    let mut first_err = String::new();
+    for rx in bind_rxs {
+        match await_bind(rx).await {
+            Ok(()) => {}
+            Err(e) => {
+                if first_err.is_empty() {
+                    first_err = e;
+                }
+                all_ok = false;
+            }
+        }
+    }
+    if !all_ok {
+        tracing::warn!(forward_id = fid, port, reason = %first_err, "listener bind failed; aborting");
+        for h in &handles {
+            h.abort();
+        }
+        return Some(ActiveForward {
+            rule: f.clone(),
+            handles: Vec::new(),
+            status: ListenerState {
+                forward_id: fid,
+                port: port as u32,
+                protocol: f.protocol.clone(),
+                ok: false,
+                error: first_err,
+            },
+            traffic,
+        });
     }
 
     Some(ActiveForward {
@@ -229,7 +247,19 @@ fn collect_traffic_stats(active: &HashMap<i64, ActiveForward>) -> Vec<TrafficSta
 /// - 删除：abort 旧 handles + 从 map 移除
 /// - 新增 / 不再 / 重新成为入口节点 / 关键字段变化：abort 旧的（若有）+ spawn 新的
 /// - rule 完全相同：保持不动
-fn reconcile_forwards(
+/// abort 一个 ActiveForward 的所有 listener task,并 await 它们 unwind（含 TcpListener/UdpSocket Drop
+/// 释放 fd）。tokio::JoinHandle::abort() 只发 cancellation flag,fd 真正释放要等 task await 退出 +
+/// 局部变量 Drop —— 直接接着 bind 同一端口 100% EADDRINUSE。timeout 2s 防止卡死 reconcile。
+async fn shutdown_active(af: ActiveForward) {
+    for h in &af.handles {
+        h.abort();
+    }
+    for h in af.handles {
+        let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
+    }
+}
+
+async fn reconcile_forwards(
     new_forwards: &[ForwardRule],
     active: &mut HashMap<i64, ActiveForward>,
     node_id: &str,
@@ -249,14 +279,9 @@ fn reconcile_forwards(
         .collect();
     for id in to_remove {
         if let Some(af) = active.remove(&id) {
-            for h in &af.handles {
-                h.abort();
-            }
-            tracing::info!(
-                forward_id = id,
-                port = af.rule.listen_port,
-                "forward removed: listener stopped"
-            );
+            let port = af.rule.listen_port;
+            shutdown_active(af).await;
+            tracing::info!(forward_id = id, port, "forward removed: listener stopped");
         }
     }
 
@@ -271,44 +296,43 @@ fn reconcile_forwards(
 
         if !still_entry {
             if let Some(af) = active.remove(&fid) {
-                for h in &af.handles {
-                    h.abort();
-                }
+                shutdown_active(af).await;
                 tracing::info!(forward_id = fid, "no longer entry: listener stopped");
             }
             continue;
         }
 
         // 已激活 + rule 完全相同 + 上次 spawn 成功 → 复用。
-        // probe_bind 失败时 spawn_forward 返回 status.ok=false + handles=empty，
-        // 此时即使 rule 不变也要重试（master 重启 reconcile 触发 EADDRINUSE 后
-        // port 短期被占后释放，下轮 reconcile 应该再试）。
+        // bind 失败时 spawn_forward 返回 status.ok=false + handles=empty，
+        // 即使 rule 不变也要重试（外部进程释放后下轮自动恢复）。
         if let Some(existing) = active.get(&fid) {
             if existing.rule == *f && existing.status.ok {
                 continue;
             }
-            // rule 变化 OR 上次 probe_bind 失败 → 重启 / 重试
+            // rule 变化 OR 上次 bind 失败 → 必须先 await 旧 task 完全退出，否则新 bind = EADDRINUSE
             if let Some(af) = active.remove(&fid) {
-                for h in &af.handles {
-                    h.abort();
-                }
+                let (old_port, prev_ok) = (af.rule.listen_port, af.status.ok);
+                shutdown_active(af).await;
                 tracing::info!(
                     forward_id = fid,
-                    old_port = af.rule.listen_port,
+                    old_port,
                     new_port = f.listen_port,
-                    prev_ok = af.status.ok,
+                    prev_ok,
                     "forward changed or prev spawn failed: restarting listener"
                 );
             }
         }
 
-        // spawn 新 listener（注意 spawn_forward 会再校验 is_entry / targets，幂等）
-        if let Some(af) = spawn_forward(f, node_id, ctx, lb, target_router, sessions, entry_node_id_arc) {
+        // spawn 新 listener（spawn_forward 内部 await 真实 bind 结果回报）
+        if let Some(af) =
+            spawn_forward(f, node_id, ctx, lb, target_router, sessions, entry_node_id_arc).await
+        {
             tracing::info!(
                 forward_id = fid,
                 port = af.rule.listen_port,
                 proto = %af.rule.protocol,
                 hops = af.rule.hops.len(),
+                ok = af.status.ok,
                 "forward listener spawned"
             );
             active.insert(fid, af);
@@ -550,7 +574,8 @@ async fn main() -> Result<()> {
         &target_router,
         &session_table,
         &entry_node_id_arc,
-    );
+    )
+    .await;
 
     // 心跳循环：5s 一次。同时刷新节点视图 + 同步 forward listener 状态。
     let mut seq = 0u64;
@@ -589,7 +614,8 @@ async fn main() -> Result<()> {
                 &target_router,
                 &session_table,
                 &entry_node_id_arc,
-            );
+            )
+            .await;
         }
     }
 }

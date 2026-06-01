@@ -63,6 +63,7 @@ pub fn udp_bind(addr: SocketAddr) -> io::Result<UdpSocket> {
     let s = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     let _ = s.set_recv_buffer_size(SOCK_BUF as usize);
     let _ = s.set_send_buffer_size(SOCK_BUF as usize);
+    s.set_reuse_address(true)?;
     s.set_nonblocking(true)?;
     s.bind(&SockAddr::from(addr))?;
     let std_sock: std::net::UdpSocket = s.into();
