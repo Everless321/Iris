@@ -5,7 +5,7 @@
   <p>智能调度 · 全链路 mTLS · 自动续签 · 实时流量统计</p>
 
 [![CI](https://github.com/Everless321/Iris/actions/workflows/musl-build.yml/badge.svg)](https://github.com/Everless321/Iris/actions/workflows/musl-build.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
 
@@ -183,4 +183,7 @@ PR、Issue、讨论欢迎：
 
 ## 📜 License
 
-[MIT](LICENSE) · Copyright (c) 2026 Iris Contributors
+[AGPL-3.0](LICENSE) · Copyright (c) 2026 Iris Contributors
+
+> 强 copyleft 协议：任何修改、分发或通过网络提供本软件服务的衍生作品，
+> 必须以同样 AGPL-3.0 协议公开完整源码。商业闭源使用请联系作者另购授权。
