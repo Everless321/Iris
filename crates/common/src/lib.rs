@@ -5,6 +5,10 @@ use rcgen::{
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 节点 leaf cert 有效期。续签门槛通常为剩 30 天，故 365 天给两次续签机会。
+const NODE_CERT_VALIDITY_DAYS: i64 = 365;
 
 /// 写文件并强制权限。在 Unix 上使用指定模式；其他平台用默认。
 fn write_with_mode(path: &str, content: &str, mode: u32) -> Result<()> {
@@ -148,9 +152,32 @@ pub fn sign_node_cert(
     params
         .distinguished_name
         .push(DnType::CommonName, format!("iris-node-{node_id}"));
+    // 显式设有效期：续签流程依赖 not_after 可读 + 在 30 天阈值内主动调 RenewCert。
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now;
+    params.not_after = now + time::Duration::days(NODE_CERT_VALIDITY_DAYS);
     let cert = params.signed_by(&key, &ca_cert, &ca_key).context("sign node leaf")?;
     let ca_pem = fs::read_to_string(format!("{dir}/ca.pem"))?;
     Ok((cert.pem(), key.serialize_pem(), ca_pem))
+}
+
+/// 解析 PEM 编码的 X.509 证书，返回 NotAfter 毫秒时间戳（UNIX epoch）。
+/// 节点启动时读取自身 cert，每次 heartbeat 上报供 UI 显示倒计时；
+/// renew task 用此判断是否进入 30 天续签窗口。
+pub fn cert_not_after_ms(pem: &[u8]) -> Result<i64> {
+    use x509_parser::pem::parse_x509_pem;
+    let (_, p) = parse_x509_pem(pem).map_err(|e| anyhow::anyhow!("parse pem: {e}"))?;
+    let cert = p.parse_x509().context("parse x509")?;
+    let secs = cert.validity().not_after.timestamp();
+    Ok(secs.saturating_mul(1000))
+}
+
+/// 现在毫秒时间戳，供节点端 renew task 比较。
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn leaf(

@@ -16,7 +16,7 @@ use tonic::{Request, Response, Status};
 use iris_proto::control::control_server::{Control, ControlServer};
 use iris_proto::control::{
     ForwardRule, HeartbeatReply, HeartbeatRequest, Hop as PbHop, HopNode as PbHopNode, NodeAddr,
-    SyncReply, SyncRequest, TargetEndpoint as PbTargetEndpoint,
+    RenewCertReply, RenewCertRequest, SyncReply, SyncRequest, TargetEndpoint as PbTargetEndpoint,
 };
 
 use models::ForwardRow;
@@ -85,6 +85,23 @@ struct ControlSvc {
     pool: SqlitePool,
     listener_states: ListenerStateView,
     traffic_last: TrafficLastView,
+    /// CA 目录，RenewCert 时调 sign_node_cert 用。
+    cert_dir: String,
+}
+
+/// 从 tonic Request 的 mTLS peer cert 链中解析首张证书的 Subject CN。
+/// 节点 cert 的 CN 格式为 `iris-node-<node_id>`（参见 common::sign_node_cert）。
+/// 返回 node_id 部分；解析失败或无 peer cert 返回 None。
+fn peer_cn_node_id<T>(req: &Request<T>) -> Option<String> {
+    let certs = req.peer_certs()?;
+    let leaf = certs.first()?;
+    let (_, c) = x509_parser::parse_x509_certificate(leaf.as_ref()).ok()?;
+    for rdn in c.subject().iter_common_name() {
+        if let Ok(cn) = rdn.as_str() {
+            return cn.strip_prefix("iris-node-").map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 #[tonic::async_trait]
@@ -96,12 +113,18 @@ impl Control for ControlSvc {
         let r = req.into_inner();
         tracing::info!(node = %r.node_id, seq = r.seq, load = r.load,
             listeners = r.listener_states.len(), "heartbeat");
-        match sqlx::query("UPDATE nodes SET status='online', last_seen=? WHERE id=?")
-            .bind(now_ms() as i64)
-            .bind(&r.node_id)
-            .execute(&self.pool)
-            .await
-        {
+        // 同时更新 cert_not_after_ms（节点上报）。0 = 未上报，保留旧值避免覆盖。
+        let cna = r.cert_not_after_ms;
+        let upd = if cna > 0 {
+            sqlx::query("UPDATE nodes SET status='online', last_seen=?, cert_not_after_ms=? WHERE id=?")
+                .bind(now_ms() as i64).bind(cna).bind(&r.node_id)
+                .execute(&self.pool).await
+        } else {
+            sqlx::query("UPDATE nodes SET status='online', last_seen=? WHERE id=?")
+                .bind(now_ms() as i64).bind(&r.node_id)
+                .execute(&self.pool).await
+        };
+        match upd {
             Ok(res) if res.rows_affected() == 0 => {
                 tracing::warn!(node = %r.node_id, "心跳来自未注册节点")
             }
@@ -239,6 +262,35 @@ impl Control for ControlSvc {
 
         Ok(Response::new(SyncReply { forwards, nodes }))
     }
+
+    /// 节点 cert 临近过期时主动调用：用现有 mTLS cert 认证，
+    /// master 校验 peer cert CN == request.node_id 后用同一 CA 签发新 cert。
+    /// 失败统一返回 PermissionDenied，避免泄露内部状态。
+    async fn renew_cert(
+        &self,
+        req: Request<RenewCertRequest>,
+    ) -> Result<Response<RenewCertReply>, Status> {
+        let cn_node = peer_cn_node_id(&req)
+            .ok_or_else(|| Status::permission_denied("missing or invalid peer cert"))?;
+        let r = req.into_inner();
+        if r.node_id.is_empty() || r.node_id != cn_node {
+            tracing::warn!(claimed = %r.node_id, peer_cn = %cn_node, "renew_cert: node_id 与 peer cert CN 不匹配");
+            return Err(Status::permission_denied("node_id mismatch with peer cert"));
+        }
+        let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes WHERE id=?")
+            .bind(&r.node_id).fetch_one(&self.pool).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if exists == 0 {
+            return Err(Status::permission_denied("node not registered"));
+        }
+        let (cert_pem, key_pem, _ca_pem) =
+            iris_common::sign_node_cert(&self.cert_dir, &r.node_id)
+                .map_err(|e| Status::internal(format!("sign: {e}")))?;
+        let valid_until_ms = iris_common::cert_not_after_ms(cert_pem.as_bytes())
+            .map_err(|e| Status::internal(format!("parse new cert: {e}")))?;
+        tracing::info!(node = %r.node_id, valid_until_ms, "renew_cert: issued new cert");
+        Ok(Response::new(RenewCertReply { cert_pem, key_pem, valid_until_ms }))
+    }
 }
 
 #[tokio::main]
@@ -338,6 +390,7 @@ async fn main() -> Result<()> {
         pool,
         listener_states: listener_states.clone(),
         traffic_last,
+        cert_dir: cert_dir(),
     };
     let addr = grpc_addr().parse()?;
     tracing::info!(%addr, "grpc control listening (mTLS)");

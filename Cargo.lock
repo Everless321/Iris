@@ -1182,6 +1182,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rcgen",
+ "time",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1206,6 +1208,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1214,6 +1217,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "iris-common",
  "iris-proto",
  "prost",
  "quinn",

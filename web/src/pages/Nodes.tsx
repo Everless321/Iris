@@ -18,6 +18,23 @@ function HealthTag({ h }: { h: string }) {
   return <Tag icon={<QuestionCircleFilled />} color="default">未知</Tag>;
 }
 
+// 节点 mTLS cert 剩余天数。剩 ≤30 天节点会自动调 RenewCert RPC；
+// UI 仅展示 / 在续签失败时提示运维。
+function CertExpiryBadge({ notAfter }: { notAfter?: number }) {
+  if (!notAfter || notAfter <= 0) {
+    return <Tag color="default" style={{ margin: 0 }}>—</Tag>;
+  }
+  const remainingMs = notAfter - Date.now();
+  const remainingDays = Math.floor(remainingMs / (24 * 3600 * 1000));
+  if (remainingDays <= 7) {
+    return <Tag color="error" style={{ margin: 0, fontFamily: "inherit" }}>{remainingDays}d ❌</Tag>;
+  }
+  if (remainingDays <= 30) {
+    return <Tag color="warning" style={{ margin: 0, fontFamily: "inherit" }}>{remainingDays}d ⚠</Tag>;
+  }
+  return <Tag color="success" style={{ margin: 0, fontFamily: "inherit" }}>{remainingDays}d</Tag>;
+}
+
 function InstallDialog({
   open, enrollment, onClose,
 }: {
@@ -167,6 +184,10 @@ export default function Nodes() {
       render: (_, n) => n.probe_total > 0
         ? <Text className="num">{((n.probe_ok / n.probe_total) * 100).toFixed(1)}%</Text>
         : <Text type="secondary">—</Text>,
+    },
+    {
+      title: "证书到期", key: "cert_expiry", width: 110,
+      render: (_, n) => <CertExpiryBadge notAfter={n.cert_not_after_ms} />,
     },
     {
       title: "操作", key: "actions", width: 200, align: "right",

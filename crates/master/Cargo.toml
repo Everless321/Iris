@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 iris-proto = { path = "../proto" }
 iris-common = { path = "../common" }
+x509-parser = "0.16"
 tokio.workspace = true
 tonic.workspace = true
 # 显式 install rustls crypto provider — feature unification 后 ring+aws_lc_rs 共存,

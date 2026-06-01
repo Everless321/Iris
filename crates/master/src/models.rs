@@ -27,6 +27,11 @@ pub struct Node {
     pub down_since: Option<i64>,
     #[serde(default)]
     pub downtime_ms: i64,
+    /// migration 0009：节点 mTLS client cert NotAfter (unix ms)。0 = 未上报 / 老节点。
+    /// UI 用此显示到期倒计时；剩 ≤ 30 天节点自动触发 RenewCert。
+    #[sqlx(default)]
+    #[serde(default)]
+    pub cert_not_after_ms: i64,
 }
 
 #[derive(Debug, Deserialize)]

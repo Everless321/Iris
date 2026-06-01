@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 rcgen.workspace = true
 anyhow.workspace = true
+x509-parser = "0.16"
+time = "0.3"

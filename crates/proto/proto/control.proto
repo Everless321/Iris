@@ -6,6 +6,9 @@ service Control {
   rpc Heartbeat (HeartbeatRequest) returns (HeartbeatReply);
   // 节点拉取与自己相关的转发配置（P1 用 pull，P2/P3 升级为 push stream）
   rpc SyncConfig (SyncRequest) returns (SyncReply);
+  // 节点 cert 临近过期主动续签：用现有 mTLS cert（仍有效）做客户端身份，
+  // master 校验 peer cert CN == request.node_id 后用同一 CA 签发新 cert。
+  rpc RenewCert (RenewCertRequest) returns (RenewCertReply);
 }
 
 message HeartbeatRequest {
@@ -19,6 +22,9 @@ message HeartbeatRequest {
   // master 用 delta = current - last_reported 累加到持久化列；node 重启后 current 重置为 0,
   // master 检测到 current < last 时把 delta 设为 current（视作新 epoch）。
   repeated TrafficStat traffic_stats = 5;
+  // 节点当前 mTLS client cert 的 NotAfter 毫秒时间戳。0 = 未知/老节点。
+  // master 写入 nodes.cert_not_after_ms 供 UI 显示倒计时 + admin 排查续签状态。
+  int64 cert_not_after_ms = 6;
 }
 message HeartbeatReply {
   uint64 server_time = 1;
@@ -48,6 +54,17 @@ message TrafficStat {
 message SyncRequest {
   string node_id = 1;
 }
+
+// 续签请求。client 用现有 mTLS cert 认证；node_id 必须与 peer cert CN 末段一致。
+message RenewCertRequest {
+  string node_id = 1;
+}
+message RenewCertReply {
+  string cert_pem = 1;
+  string key_pem = 2;
+  int64 valid_until_ms = 3; // 新 cert 的 NotAfter 毫秒时间戳
+}
+
 message SyncReply {
   repeated ForwardRule forwards = 1;
   repeated NodeAddr nodes = 2; // 全量节点地址表，供节点解析下一跳

@@ -217,6 +217,7 @@ async fn create_node(
         id: n.id, name: n.name, addr: n.addr, status: "offline".into(), last_seen: None,
         created_at: now, weight: n.weight, health: "unknown".into(), latency_ms: None,
         fail_count: 0, probe_total: 0, probe_ok: 0, fail_events: 0, down_since: None, downtime_ms: 0,
+        cert_not_after_ms: 0,
     }))
 }
 
