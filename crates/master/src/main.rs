@@ -90,15 +90,20 @@ struct ControlSvc {
 }
 
 /// 从 tonic Request 的 mTLS peer cert 链中解析首张证书的 Subject CN。
-/// 节点 cert 的 CN 格式为 `iris-node-<node_id>`（参见 common::sign_node_cert）。
-/// 返回 node_id 部分；解析失败或无 peer cert 返回 None。
+/// 节点 cert CN 格式 `iris-node-<id>`（参见 common::sign_node_cert）；
+/// rebrand #25 之前签发的 legacy cert CN 是 `zhuanfa-node-<id>`，
+/// 容忍其作为过渡 — 让 legacy 节点也能调 RenewCert 自助升级到新 CN。
+/// 解析失败或无 peer cert 返回 None。
 fn peer_cn_node_id<T>(req: &Request<T>) -> Option<String> {
     let certs = req.peer_certs()?;
     let leaf = certs.first()?;
     let (_, c) = x509_parser::parse_x509_certificate(leaf.as_ref()).ok()?;
     for rdn in c.subject().iter_common_name() {
         if let Ok(cn) = rdn.as_str() {
-            return cn.strip_prefix("iris-node-").map(|s| s.to_string());
+            return cn
+                .strip_prefix("iris-node-")
+                .or_else(|| cn.strip_prefix("zhuanfa-node-"))
+                .map(|s| s.to_string());
         }
     }
     None
