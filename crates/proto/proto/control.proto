@@ -25,6 +25,29 @@ message HeartbeatRequest {
   // 节点当前 mTLS client cert 的 NotAfter 毫秒时间戳。0 = 未知/老节点。
   // master 写入 nodes.cert_not_after_ms 供 UI 显示倒计时 + admin 排查续签状态。
   int64 cert_not_after_ms = 6;
+  // 本周期内入口节点新增/活跃/关闭的 TCP 会话。节点保留 active session 直至下一轮上报，
+  // closed 后再保留 1 轮（让 master 拿到 final bytes + close_reason）然后从节点删除。
+  // master upsert by id：新 id INSERT，已知 id UPDATE bytes + closed_at + reason。
+  repeated SessionEvent session_events = 7;
+}
+
+// 单条 TCP 会话（每个 forward 入口 accept 的 connection）。
+// id 由节点生成（UUID），整个生命周期保持一致：active 期间 closed_at_ms=0，
+// 关闭后填 closed_at_ms + close_reason；bytes_in/out 是累计值（不是 delta）。
+message SessionEvent {
+  string id = 1;
+  int64 forward_id = 2;
+  string entry_node_id = 3;
+  string client_ip = 4;
+  uint32 client_port = 5;
+  string target_addr = 6;
+  repeated string hops_path = 7;   // ["node_a","node_b","node_c"]
+  string protocol = 8;             // "tcp" | "udp"
+  int64 opened_at_ms = 9;
+  int64 closed_at_ms = 10;         // 0 = still active
+  uint64 bytes_in = 11;            // 累计字节数（不是 delta）
+  uint64 bytes_out = 12;
+  string close_reason = 13;        // "" if active; "normal" | "timeout" | "error" | "failover"
 }
 message HeartbeatReply {
   uint64 server_time = 1;
