@@ -1,0 +1,23 @@
+[Unit]
+Description=Iris Master (control plane)
+Documentation=https://github.com/Everless321/Iris
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/iris/master.env
+WorkingDirectory=/opt/iris
+ExecStart=/opt/iris/iris-master
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/iris/data /opt/iris/certs
+
+[Install]
+WantedBy=multi-user.target

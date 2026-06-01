@@ -45,7 +45,7 @@ IRIS_ADMIN_PASS=$(openssl rand -base64 24)
 EOF
 sudo chmod 600 /opt/iris/master.env
 
-# 3. 启 systemd service（unit 见 docs/deploy/iris-master.service 或自行编写）
+# 3. 启 systemd service（unit 见 deploy/master/iris-master.service 或自行编写）
 sudo systemctl enable --now iris-master
 
 # 4. 浏览器打开 http://<MASTER>:7080，admin 登录
@@ -171,15 +171,13 @@ bash scripts/demo-midfail.sh   # 中转故障转移
 
 PR、Issue、讨论欢迎：
 - 提交代码前先 `cargo check --workspace`（CI 也会跑）
-- 节点变更涉及 mTLS / cert 续签的代码改动需要 e2e 测试（见 `docs/testing/`）
-- 详细 changelog 见 `docs/changelog/`
+- 节点变更涉及 mTLS / cert 续签的代码改动建议做 e2e 测试再提交
+- Commit message 用 conventional 风格：`feat: xxx` / `fix: xxx` / `chore: xxx`
 
-## 📚 文档索引
+## 📚 部署参考
 
-- `docs/changelog/` — 每次变更的设计 + 实测结果（按时间倒序）
-- `docs/testing/` — 测试 spec（mTLS、性能、流量统计等）
-- `docs/benchmark/` — 性能基准数据（带宽对比图等）
-- `deploy/gcp/` — GCP 自定义镜像 + bootstrap 脚本参考
+- `deploy/master/` — master systemd unit 模板 + 安装步骤
+- `deploy/gcp/` — GCP 自定义镜像 bootstrap.sh + service unit 参考
 
 ## 📜 License
 
