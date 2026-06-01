@@ -93,20 +93,11 @@ export default function Layout() {
             borderBottom: `1px solid ${token.colorBorderSecondary}`,
           }}
         >
-          <div
-            style={{
-              width: 28, height: 28, borderRadius: 6,
-              background: "#1677ff",
-              color: "#fff",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontWeight: 600,
-              fontSize: 14,
-            }}
-          >
-            z
-          </div>
+          <img
+            src="/logo.png"
+            alt="Iris"
+            style={{ width: 28, height: 28, borderRadius: 6 }}
+          />
           <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 0.2 }}>Iris</span>
         </div>
         <Menu
