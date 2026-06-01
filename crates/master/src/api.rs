@@ -65,6 +65,10 @@ pub fn router(state: AppState) -> Router {
             "/api/forwards/:id",
             put(update_forward).delete(delete_forward),
         )
+        // #36 会话级历史
+        .route("/api/forwards/:id/sessions", get(list_forward_sessions))
+        .route("/api/forwards/:id/sessions/active", get(list_active_sessions))
+        .route("/api/sessions/:id", get(get_session))
         // 邀请码 & 用户管理：admin only
         .route("/api/invites", get(list_invites).post(create_invite))
         .route("/api/users", get(list_users))
@@ -599,6 +603,152 @@ async fn install_script(headers: axum::http::HeaderMap) -> axum::response::Respo
         body,
     )
         .into_response()
+}
+
+// ---- #36 sessions ----
+
+#[derive(Debug, sqlx::FromRow)]
+struct SessionRow {
+    id: String,
+    forward_id: i64,
+    entry_node_id: String,
+    client_ip: String,
+    client_port: i64,
+    target_addr: String,
+    hops_path: String,
+    protocol: String,
+    opened_at_ms: i64,
+    closed_at_ms: Option<i64>,
+    bytes_in: i64,
+    bytes_out: i64,
+    close_reason: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct Session {
+    id: String,
+    forward_id: i64,
+    entry_node_id: String,
+    client_ip: String,
+    client_port: i64,
+    target_addr: String,
+    hops_path: Vec<String>,
+    protocol: String,
+    opened_at_ms: i64,
+    closed_at_ms: Option<i64>,
+    bytes_in: i64,
+    bytes_out: i64,
+    close_reason: Option<String>,
+}
+
+impl From<SessionRow> for Session {
+    fn from(r: SessionRow) -> Self {
+        Session {
+            id: r.id,
+            forward_id: r.forward_id,
+            entry_node_id: r.entry_node_id,
+            client_ip: r.client_ip,
+            client_port: r.client_port,
+            target_addr: r.target_addr,
+            hops_path: serde_json::from_str(&r.hops_path).unwrap_or_default(),
+            protocol: r.protocol,
+            opened_at_ms: r.opened_at_ms,
+            closed_at_ms: r.closed_at_ms,
+            bytes_in: r.bytes_in,
+            bytes_out: r.bytes_out,
+            close_reason: r.close_reason,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ListSessionsQuery {
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default)]
+    page_size: Option<i64>,
+    #[serde(default)]
+    from: Option<i64>,
+    #[serde(default)]
+    to: Option<i64>,
+    #[serde(default)]
+    client_ip: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionsResp {
+    sessions: Vec<Session>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
+async fn list_forward_sessions(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(forward_id): Path<i64>,
+    axum::extract::Query(q): axum::extract::Query<ListSessionsQuery>,
+) -> Result<Json<SessionsResp>, ApiErr> {
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(50).clamp(1, 500);
+    let offset = (page - 1) * page_size;
+
+    // 动态拼 where + bind 参数（顺序必须一致）
+    let mut where_clauses: Vec<&str> = vec!["forward_id = ?"];
+    if q.from.is_some() { where_clauses.push("opened_at_ms >= ?"); }
+    if q.to.is_some() { where_clauses.push("opened_at_ms <= ?"); }
+    if q.client_ip.is_some() { where_clauses.push("client_ip = ?"); }
+    let where_sql = where_clauses.join(" AND ");
+
+    let count_sql = format!("SELECT COUNT(*) FROM forward_sessions WHERE {where_sql}");
+    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql).bind(forward_id);
+    if let Some(f) = q.from { count_q = count_q.bind(f); }
+    if let Some(t) = q.to { count_q = count_q.bind(t); }
+    if let Some(ref ip) = q.client_ip { count_q = count_q.bind(ip.clone()); }
+    let total: i64 = count_q.fetch_one(&s.pool).await.map_err(err)?;
+
+    let list_sql = format!(
+        "SELECT * FROM forward_sessions WHERE {where_sql} ORDER BY opened_at_ms DESC LIMIT ? OFFSET ?"
+    );
+    let mut list_q = sqlx::query_as::<_, SessionRow>(&list_sql).bind(forward_id);
+    if let Some(f) = q.from { list_q = list_q.bind(f); }
+    if let Some(t) = q.to { list_q = list_q.bind(t); }
+    if let Some(ref ip) = q.client_ip { list_q = list_q.bind(ip.clone()); }
+    let rows = list_q.bind(page_size).bind(offset).fetch_all(&s.pool).await.map_err(err)?;
+    let sessions: Vec<Session> = rows.into_iter().map(Session::from).collect();
+    Ok(Json(SessionsResp { sessions, total, page, page_size }))
+}
+
+async fn list_active_sessions(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(forward_id): Path<i64>,
+) -> Result<Json<Vec<Session>>, ApiErr> {
+    let rows: Vec<SessionRow> = sqlx::query_as(
+        "SELECT * FROM forward_sessions WHERE forward_id = ? AND closed_at_ms IS NULL \
+         ORDER BY opened_at_ms DESC LIMIT 500",
+    )
+    .bind(forward_id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(err)?;
+    Ok(Json(rows.into_iter().map(Session::from).collect()))
+}
+
+async fn get_session(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Session>, ApiErr> {
+    let row: Option<SessionRow> =
+        sqlx::query_as("SELECT * FROM forward_sessions WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&s.pool)
+            .await
+            .map_err(err)?;
+    row.map(Session::from)
+        .map(Json)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".into()))
 }
 
 async fn list_users(_: AdminClaims, State(s): State<AppState>) -> Result<Json<Vec<UserDto>>, ApiErr> {

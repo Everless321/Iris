@@ -77,6 +77,63 @@ fn admin_bootstrap() -> Option<(String, String)> {
     let p = std::env::var("IRIS_ADMIN_PASS").ok()?;
     Some((u, p))
 }
+/// #36 session 明细保留天数。0 = 永久全量（默认）。>0 = 超期明细聚合到 hourly 后 DELETE。
+fn session_retain_days() -> i64 {
+    std::env::var("IRIS_SESSION_RETAIN_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+/// #36 session hourly 聚合保留天数。0 = 永久（默认）。
+fn session_hourly_retain_days() -> i64 {
+    std::env::var("IRIS_SESSION_HOURLY_RETAIN_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// #36 retention 一次 pass：明细聚合到 hourly + DELETE 过期；hourly 表过期 DELETE。
+/// 两个开关独立，0 = 跳过该层。
+async fn session_retention_pass(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let now = now_ms() as i64;
+    let retain_d = session_retain_days();
+    if retain_d > 0 {
+        let cutoff = now - retain_d * 24 * 3600 * 1000;
+        sqlx::query(
+            "INSERT INTO forward_sessions_hourly \
+                (forward_id, hour_start_ms, session_count, total_bytes_in, total_bytes_out, unique_clients) \
+             SELECT forward_id, \
+                    (opened_at_ms / 3600000) * 3600000 AS hour_start_ms, \
+                    COUNT(*), SUM(bytes_in), SUM(bytes_out), COUNT(DISTINCT client_ip) \
+             FROM forward_sessions \
+             WHERE closed_at_ms IS NOT NULL AND closed_at_ms < ? \
+             GROUP BY forward_id, hour_start_ms \
+             ON CONFLICT(forward_id, hour_start_ms) DO UPDATE SET \
+                session_count = session_count + excluded.session_count, \
+                total_bytes_in = total_bytes_in + excluded.total_bytes_in, \
+                total_bytes_out = total_bytes_out + excluded.total_bytes_out, \
+                unique_clients = unique_clients + excluded.unique_clients",
+        )
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "DELETE FROM forward_sessions WHERE closed_at_ms IS NOT NULL AND closed_at_ms < ?",
+        )
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    }
+    let hourly_d = session_hourly_retain_days();
+    if hourly_d > 0 {
+        let cutoff = now - hourly_d * 24 * 3600 * 1000;
+        sqlx::query("DELETE FROM forward_sessions_hourly WHERE hour_start_ms < ?")
+            .bind(cutoff)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
@@ -157,6 +214,45 @@ impl Control for ControlSvc {
                         updated_at: now,
                     },
                 );
+            }
+        }
+        // #36 会话事件：每条 TCP 连接的生命周期记录。upsert by id，closed_at_ms=0 → NULL（active）。
+        if !r.session_events.is_empty() {
+            for ev in &r.session_events {
+                let hops_json = serde_json::to_string(&ev.hops_path).unwrap_or_else(|_| "[]".into());
+                let closed: Option<i64> =
+                    if ev.closed_at_ms > 0 { Some(ev.closed_at_ms) } else { None };
+                let reason: Option<&str> =
+                    if ev.close_reason.is_empty() { None } else { Some(ev.close_reason.as_str()) };
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO forward_sessions (id, forward_id, entry_node_id, client_ip, \
+                     client_port, target_addr, hops_path, protocol, opened_at_ms, \
+                     closed_at_ms, bytes_in, bytes_out, close_reason) \
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) \
+                     ON CONFLICT(id) DO UPDATE SET \
+                       closed_at_ms = excluded.closed_at_ms, \
+                       bytes_in = excluded.bytes_in, \
+                       bytes_out = excluded.bytes_out, \
+                       close_reason = excluded.close_reason",
+                )
+                .bind(&ev.id)
+                .bind(ev.forward_id)
+                .bind(&ev.entry_node_id)
+                .bind(&ev.client_ip)
+                .bind(ev.client_port as i64)
+                .bind(&ev.target_addr)
+                .bind(&hops_json)
+                .bind(&ev.protocol)
+                .bind(ev.opened_at_ms)
+                .bind(closed)
+                .bind(ev.bytes_in as i64)
+                .bind(ev.bytes_out as i64)
+                .bind(reason)
+                .execute(&self.pool)
+                .await
+                {
+                    tracing::warn!(session_id = %ev.id, error = %e, "session upsert failed");
+                }
             }
         }
         // 流量 delta 累加到 forwards 表。current<last 视作 node 重启 → delta=current。
@@ -338,6 +434,27 @@ async fn main() -> Result<()> {
 
     // 健康探测调度器
     probe::spawn(pool.clone(), probe_interval(), fail_threshold());
+
+    // #36 session retention cron：每 1h 跑一次。两个 env 默认 0 = 永久不归档。
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            // 首次 tick 立刻触发；防止启动时立即跑（让 master 稳一会儿）
+            tick.tick().await;
+            tracing::info!(
+                retain_days = session_retain_days(),
+                hourly_retain_days = session_hourly_retain_days(),
+                "session retention cron started"
+            );
+            loop {
+                tick.tick().await;
+                if let Err(e) = session_retention_pass(&pool).await {
+                    tracing::warn!(error = %e, "session retention pass failed");
+                }
+            }
+        });
+    }
 
     // 预先准备 mTLS client config，让 master 能反向调用节点 DataPlane（用于链路测试 ProbeReach）
     let dir = cert_dir();
