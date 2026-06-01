@@ -65,6 +65,7 @@ export type Node = {
   downtime_ms: number;
   last_seen: number | null;
   created_at: number;
+  cert_not_after_ms?: number;
 };
 export type HopNode = { id: string; weight: number };
 export type Hop = { strategy: string; nodes: HopNode[] };

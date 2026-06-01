@@ -21,8 +21,10 @@ use tonic::transport::{
 use iris_proto::control::control_client::ControlClient;
 use iris_proto::control::data_plane_server::DataPlaneServer;
 use iris_proto::control::{
-    ForwardRule, HeartbeatRequest, ListenerState, NodeAddr, SyncRequest, TrafficStat,
+    ForwardRule, HeartbeatRequest, ListenerState, NodeAddr, RenewCertRequest, SyncRequest,
+    TrafficStat,
 };
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// 一条已激活 forward 的句柄：rule 全量快照（用于 diff 判定是否需要重启），
 /// handles 持 TCP/UDP listener task 的 JoinHandle（abort 即可关闭 listener + 释放端口）。
@@ -340,6 +342,14 @@ async fn main() -> Result<()> {
     let ca_pem = std::fs::read(p("ca.pem"))?;
     let cert_pem = std::fs::read(p("client.pem"))?;
     let key_pem = std::fs::read(p("client-key.pem"))?;
+    // 解析 cert NotAfter 给 heartbeat 上报 + renew task 触发判断。
+    let cert_not_after = Arc::new(AtomicI64::new(
+        iris_common::cert_not_after_ms(&cert_pem).unwrap_or(0),
+    ));
+    tracing::info!(
+        cert_not_after_ms = cert_not_after.load(Ordering::Relaxed),
+        "cert loaded"
+    );
     // tonic 用（保持 gRPC 数据面 + 控制面兼容）
     let ca = Certificate::from_pem(&ca_pem);
     let identity = Identity::from_pem(&cert_pem, &key_pem);
@@ -447,6 +457,66 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Cert 自动续签 background task：每 ~1h 检查 cert NotAfter，剩 ≤30 天触发 RenewCert RPC，
+    // 成功后原子替换 client.pem + client-key.pem → process exit(0) 让 systemd 重启加载新 cert。
+    // 节点自身哈希派生 ±60s 抖动避开羊群效应。IRIS_AUTO_RENEW=0 关闭。
+    if env("IRIS_AUTO_RENEW", "1") != "0" {
+        let mut renew_client = client.clone();
+        let cert_not_after = cert_not_after.clone();
+        let cert_dir = cert_dir.clone();
+        let node_id_t = node_id.clone();
+        let jitter_secs: u64 = {
+            let h: u64 = node_id_t.bytes().fold(0u64, |a, b| a.wrapping_add(b as u64));
+            3600 + (h % 120).saturating_sub(60)
+        };
+        tokio::spawn(async move {
+            // 启动后等 60s 让首轮 heartbeat + sync_config 走完
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            loop {
+                tokio::time::sleep(Duration::from_secs(jitter_secs)).await;
+                let not_after = cert_not_after.load(Ordering::Relaxed);
+                if not_after <= 0 {
+                    continue;
+                }
+                let now = iris_common::now_ms();
+                let remaining_days = (not_after - now) / (24 * 3600 * 1000);
+                if remaining_days > 30 {
+                    tracing::debug!(remaining_days, "cert 充足，跳过续签");
+                    continue;
+                }
+                tracing::info!(remaining_days, "cert 临近过期，触发 RenewCert");
+                match renew_client
+                    .renew_cert(RenewCertRequest { node_id: node_id_t.clone() })
+                    .await
+                {
+                    Ok(resp) => {
+                        let r = resp.into_inner();
+                        let cert_path = format!("{cert_dir}/client.pem");
+                        let key_path = format!("{cert_dir}/client-key.pem");
+                        let cert_tmp = format!("{cert_path}.new");
+                        let key_tmp = format!("{key_path}.new");
+                        if let Err(e) = std::fs::write(&cert_tmp, &r.cert_pem)
+                            .and_then(|_| std::fs::write(&key_tmp, &r.key_pem))
+                            .and_then(|_| std::fs::rename(&cert_tmp, &cert_path))
+                            .and_then(|_| std::fs::rename(&key_tmp, &key_path))
+                        {
+                            tracing::error!(error = %e, "renew_cert: 写新 cert/key 失败，下轮重试");
+                            continue;
+                        }
+                        tracing::warn!(
+                            valid_until_ms = r.valid_until_ms,
+                            "cert 续签成功，进程退出由 systemd 重启加载新 cert"
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "renew_cert RPC 失败，1h 后重试");
+                    }
+                }
+            }
+        });
+    }
+
     // 启动入口监听器 + 后续 sync_config 时 reconcile（热加载，无需 restart node）
     let mut active_forwards: HashMap<i64, ActiveForward> = HashMap::new();
     reconcile_forwards(
@@ -473,6 +543,7 @@ async fn main() -> Result<()> {
                 load: 0.0,
                 listener_states,
                 traffic_stats,
+                cert_not_after_ms: cert_not_after.load(Ordering::Relaxed),
             })
             .await
         {

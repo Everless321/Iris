@@ -10,3 +10,5 @@
 /web/dist
 /artifact
 .ace-tool/
+.codegraph/
+.cursor/
