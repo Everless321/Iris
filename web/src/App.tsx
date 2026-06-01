@@ -7,6 +7,7 @@ import Register from "./pages/Register";
 import Dashboard from "./pages/Dashboard";
 import Nodes from "./pages/Nodes";
 import Forwards from "./pages/Forwards";
+import ForwardDetail from "./pages/ForwardDetail";
 import TopologyEditor from "./pages/TopologyEditor";
 import Users from "./pages/Users";
 import Invites from "./pages/Invites";
@@ -41,6 +42,7 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="forwards" element={<Forwards />} />
         <Route path="forwards/new" element={<TopologyEditor />} />
+        <Route path="forwards/:id" element={<ForwardDetail />} />
         <Route path="forwards/:id/edit" element={<TopologyEditor />} />
         <Route
           path="nodes"

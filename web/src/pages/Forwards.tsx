@@ -32,7 +32,7 @@ export default function Forwards() {
       dataIndex: "name",
       key: "name",
       render: (name, f) => (
-        <Link to={`/forwards/${f.id}/edit`}>
+        <Link to={`/forwards/${f.id}`}>
           <Text strong>{name}</Text>
         </Link>
       ),

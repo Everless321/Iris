@@ -11,6 +11,9 @@ IRIS_ADMIN_USER=admin
 IRIS_ADMIN_PASS=$(openssl rand -base64 24)
 # 生产强烈建议:
 # IRIS_REQUIRE_TLS=1
+# 会话明细保留: 0=永久全量 (默认), N=N天后聚合到 hourly 表 + DELETE 明细
+# IRIS_SESSION_RETAIN_DAYS=0
+# IRIS_SESSION_HOURLY_RETAIN_DAYS=0
 EOF
 sudo chmod 600 /opt/iris/master.env
 

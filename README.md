@@ -124,6 +124,8 @@ crates/
 | `IRIS_PROBE_INTERVAL` | `15` | 节点探测间隔（秒）|
 | `IRIS_FAIL_THRESHOLD` | `2` | 连续失败几次判不健康 |
 | `IRIS_REQUIRE_TLS` | `0` | `1` = 强制 HTTPS（生产建议） |
+| `IRIS_SESSION_RETAIN_DAYS` | `0` | TCP 会话明细保留天数。0 = 永久全量；>0 = 超期聚合到 hourly 后 DELETE |
+| `IRIS_SESSION_HOURLY_RETAIN_DAYS` | `0` | 小时聚合保留天数。0 = 永久 |
 
 ### node
 

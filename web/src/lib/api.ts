@@ -115,6 +115,29 @@ export type EdgeProbe = {
 };
 export type TestResponse = { results: EdgeProbe[] };
 
+// #36 会话级历史
+export type Session = {
+  id: string;
+  forward_id: number;
+  entry_node_id: string;
+  client_ip: string;
+  client_port: number;
+  target_addr: string;
+  hops_path: string[];
+  protocol: string;
+  opened_at_ms: number;
+  closed_at_ms: number | null;
+  bytes_in: number;
+  bytes_out: number;
+  close_reason: string | null;
+};
+export type SessionsResp = {
+  sessions: Session[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 export type Sla = {
   online: number;
   total: number;
