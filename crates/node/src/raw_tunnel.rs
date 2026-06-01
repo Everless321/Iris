@@ -385,16 +385,19 @@ async fn try_open(
 // ============================== Entry helpers ==============================
 
 /// TCP 入口连接 → raw tunnel 桥接。traffic 由入口节点的 ActiveForward 共享 (仅入口统计)。
+/// session 跟 traffic 平行累加：traffic 是全 forward 累计字节，session 是单条 TCP 会话字节。
 pub async fn handle_entry_tcp(
     inbound: TcpStream,
     nr: ReadHalf<ClientTlsStream<TcpStream>>,
     nw: WriteHalf<ClientTlsStream<TcpStream>>,
     traffic: Arc<TrafficCounter>,
+    session: Arc<crate::session::SessionState>,
 ) {
     let (mut ir, mut iw) = inbound.into_split();
     let mut nr = nr;
     let mut nw = nw;
     let traffic_up = traffic.clone();
+    let sess_up = session.clone();
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; BUF];
         loop {
@@ -402,6 +405,7 @@ pub async fn handle_entry_tcp(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     traffic_up.add_in(n);
+                    sess_up.add_in(n);
                     if write_frame(&mut nw, &buf[..n]).await.is_err() {
                         break;
                     }
@@ -410,6 +414,7 @@ pub async fn handle_entry_tcp(
         }
     });
     let traffic_dn = traffic;
+    let sess_dn = session;
     let down = tokio::spawn(async move {
         loop {
             match read_frame(&mut nr, MAX_FRAME).await {
@@ -419,6 +424,7 @@ pub async fn handle_entry_tcp(
                         break;
                     }
                     traffic_dn.add_out(n);
+                    sess_dn.add_out(n);
                 }
                 _ => break,
             }

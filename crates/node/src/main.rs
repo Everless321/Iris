@@ -3,6 +3,7 @@ mod forward;
 mod lb;
 mod quic_tunnel;
 mod raw_tunnel;
+mod session;
 mod sock;
 mod udp_forward;
 
@@ -61,6 +62,8 @@ fn spawn_forward(
     ctx: &Arc<NodeCtx>,
     lb: &Arc<LoadBalancer>,
     target_router: &Arc<dataplane::TargetRouter>,
+    sessions: &Arc<session::SessionTable>,
+    entry_node_id_arc: &Arc<String>,
 ) -> Option<ActiveForward> {
     let is_entry = f
         .hops
@@ -125,24 +128,32 @@ fn spawn_forward(
 
     if has_tcp {
         if f.hops.len() == 1 {
-            let (t, s, tc) = (targets.clone(), target_strategy.clone(), traffic.clone());
+            let (t, s, tc, ss, ent) = (
+                targets.clone(),
+                target_strategy.clone(),
+                traffic.clone(),
+                sessions.clone(),
+                entry_node_id_arc.clone(),
+            );
             handles.push(tokio::spawn(async move {
-                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc).await {
+                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc, ss, ent).await {
                     tracing::error!(error = %e, "tcp single-hop entry exited");
                 }
             }));
         } else {
-            let (hops, t, s, ctx2, lb2, tc) = (
+            let (hops, t, s, ctx2, lb2, tc, ss, ent) = (
                 f.hops.clone(),
                 targets.clone(),
                 target_strategy.clone(),
                 ctx.clone(),
                 lb.clone(),
                 traffic.clone(),
+                sessions.clone(),
+                entry_node_id_arc.clone(),
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc).await
+                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent).await
                 {
                     tracing::error!(error = %e, "tcp multi-hop entry exited");
                 }
@@ -225,6 +236,8 @@ fn reconcile_forwards(
     ctx: &Arc<NodeCtx>,
     lb: &Arc<LoadBalancer>,
     target_router: &Arc<dataplane::TargetRouter>,
+    sessions: &Arc<session::SessionTable>,
+    entry_node_id_arc: &Arc<String>,
 ) {
     let new_ids: std::collections::HashSet<i64> = new_forwards.iter().map(|f| f.id).collect();
 
@@ -286,7 +299,7 @@ fn reconcile_forwards(
         }
 
         // spawn 新 listener（注意 spawn_forward 会再校验 is_entry / targets，幂等）
-        if let Some(af) = spawn_forward(f, node_id, ctx, lb, target_router) {
+        if let Some(af) = spawn_forward(f, node_id, ctx, lb, target_router, sessions, entry_node_id_arc) {
             tracing::info!(
                 forward_id = fid,
                 port = af.rule.listen_port,
@@ -517,6 +530,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // #36 会话级历史记录：节点全局 session table，每条 TCP 入口连接对应一个 SessionState。
+    // heartbeat 时 snapshot_and_gc 上报 master；master 端 upsert by id 累计/标记关闭。
+    let session_table = session::SessionTable::new();
+    let entry_node_id_arc = Arc::new(node_id.clone());
+
     // 启动入口监听器 + 后续 sync_config 时 reconcile（热加载，无需 restart node）
     let mut active_forwards: HashMap<i64, ActiveForward> = HashMap::new();
     reconcile_forwards(
@@ -526,6 +544,8 @@ async fn main() -> Result<()> {
         &ctx,
         &lb,
         &target_router,
+        &session_table,
+        &entry_node_id_arc,
     );
 
     // 心跳循环：5s 一次。同时刷新节点视图 + 同步 forward listener 状态。
@@ -544,6 +564,7 @@ async fn main() -> Result<()> {
                 listener_states,
                 traffic_stats,
                 cert_not_after_ms: cert_not_after.load(Ordering::Relaxed),
+                session_events: session_table.snapshot_and_gc(),
             })
             .await
         {
@@ -562,6 +583,8 @@ async fn main() -> Result<()> {
                 &ctx,
                 &lb,
                 &target_router,
+                &session_table,
+                &entry_node_id_arc,
             );
         }
     }

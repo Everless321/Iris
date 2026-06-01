@@ -274,6 +274,7 @@ async fn try_open(
 }
 
 /// 入口节点：监听端口，每个客户端连接经全链路（每跳 failover）转发。
+/// `sessions` / `entry_node_id` 用于 #36 会话级历史记录。
 pub async fn run_multi_hop_entry(
     listen_port: u16,
     forward_id: i64,
@@ -283,6 +284,8 @@ pub async fn run_multi_hop_entry(
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
     traffic: Arc<TrafficCounter>,
+    sessions: Arc<crate::session::SessionTable>,
+    entry_node_id: Arc<String>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
     let l = sock::tcp_listen(bind_addr)?;
@@ -299,16 +302,20 @@ pub async fn run_multi_hop_entry(
         sock::tune_accepted(&inbound);
         let hops_rest = hops[1..].to_vec();
         let client_ip = peer.ip().to_string();
-        let (targets, strategy, ctx, lb, traffic) = (
+        let client_port = peer.port() as u32;
+        let (targets, strategy, ctx, lb, traffic, sessions, entry_node_id) = (
             targets.clone(),
             target_strategy.clone(),
             ctx.clone(),
             lb.clone(),
             traffic.clone(),
+            sessions.clone(),
+            entry_node_id.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = handle_entry_conn(
-                inbound, hops_rest, &targets, &strategy, &client_ip, forward_id, &ctx, &lb, &traffic,
+                inbound, hops_rest, &targets, &strategy, &client_ip, client_port,
+                forward_id, &ctx, &lb, &traffic, &sessions, &entry_node_id,
             )
             .await
             {
@@ -325,30 +332,47 @@ async fn handle_entry_conn(
     targets: &[TargetEndpoint],
     target_strategy: &str,
     client_ip: &str,
+    client_port: u32,
     forward_id: i64,
     ctx: &NodeCtx,
     lb: &LoadBalancer,
     traffic: &Arc<TrafficCounter>,
+    sessions: &Arc<crate::session::SessionTable>,
+    entry_node_id: &str,
 ) -> Result<()> {
     let view = ctx.view();
-    if std::env::var("IRIS_DISABLE_RAW").as_deref() == Ok("1") {
+    // hops_path V1：仅入口节点 id（V2 再展开实际选中的每跳节点）。
+    // target_addr：配置中第一个 target（V2 再换成实际选中）。
+    let target_addr = targets.first().map(|t| t.addr.clone()).unwrap_or_default();
+    let session = sessions.create(
+        forward_id,
+        entry_node_id,
+        client_ip.to_string(),
+        client_port,
+        target_addr,
+        vec![entry_node_id.to_string()],
+        "tcp",
+    );
+    let result = if std::env::var("IRIS_DISABLE_RAW").as_deref() == Ok("1") {
         let (resp, req_tx, guard) = connect_next(
             ctx, lb, &hops_rest, targets, target_strategy, client_ip,
             forward_id, 1, &view, "",
         )
         .await?;
         let _g = guard;
-        bridge_tcp(inbound, resp, req_tx, traffic.clone()).await;
+        bridge_tcp(inbound, resp, req_tx, traffic.clone(), session.clone()).await;
+        Ok::<(), anyhow::Error>(())
     } else {
-        // Phase 9a: 走 raw_tunnel（去 HTTP/2 framing）
         let (nr, nw) = crate::raw_tunnel::open_next_hop(
             ctx, lb, &hops_rest, targets, target_strategy, client_ip,
             forward_id, 1, "", &view, ctx.raw_connector.clone(),
         )
         .await?;
-        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw, traffic.clone()).await;
-    }
-    Ok(())
+        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw, traffic.clone(), session.clone()).await;
+        Ok::<(), anyhow::Error>(())
+    };
+    session.close(if result.is_ok() { "normal" } else { "error" });
+    result
 }
 
 /// 桥接 client TCP <-> 下游隧道流。
@@ -357,10 +381,13 @@ async fn bridge_tcp(
     mut resp: Streaming<Chunk>,
     req_tx: mpsc::Sender<Chunk>,
     traffic: Arc<TrafficCounter>,
+    session: Arc<crate::session::SessionState>,
 ) {
     let (mut tr, mut tw) = inbound.into_split();
     let traffic_up = traffic.clone();
     let traffic_dn = traffic;
+    let sess_up = session.clone();
+    let sess_dn = session;
     tokio::select! {
         _ = async {
             let mut buf = vec![0u8; BUF];
@@ -369,6 +396,7 @@ async fn bridge_tcp(
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         traffic_up.add_in(n);
+                        sess_up.add_in(n);
                         if req_tx.send(Chunk { header: None, data: buf[..n].to_vec() }).await.is_err() {
                             break;
                         }
@@ -383,6 +411,7 @@ async fn bridge_tcp(
                     break;
                 }
                 traffic_dn.add_out(n);
+                sess_dn.add_out(n);
             }
         } => {}
     }

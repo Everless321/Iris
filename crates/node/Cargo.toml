@@ -27,3 +27,4 @@ prost = { workspace = true }
 # Phase 9c quic_tunnel：UDP 走 QUIC datagram 解决 UDP-over-TCP 丢包根因
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"] }
 bytes = "1"
+uuid = { version = "1", features = ["v4"] }
