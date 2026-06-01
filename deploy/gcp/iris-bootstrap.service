@@ -1,0 +1,15 @@
+[Unit]
+Description=Iris node bootstrap (GCP metadata enroll)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/opt/iris/.bootstrapped
+
+[Service]
+Type=oneshot
+ExecStart=/opt/iris/bootstrap.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

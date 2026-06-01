@@ -1,0 +1,19 @@
+[Unit]
+Description=Iris forwarding node
+After=iris-bootstrap.service network-online.target
+Wants=iris-bootstrap.service
+Wants=network-online.target
+ConditionPathExists=/opt/iris/.bootstrapped
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/iris/node.env
+ExecStart=/opt/iris/iris-node
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
