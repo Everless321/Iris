@@ -144,6 +144,8 @@ struct ControlSvc {
     traffic_last: TrafficLastView,
     /// CA 目录，RenewCert 时调 sign_node_cert 用。
     cert_dir: String,
+    /// SSE 实时通知通道：heartbeat 写完 session 后 send(forward_id) 让浏览器订阅者重拉。
+    sessions_tx: tokio::sync::broadcast::Sender<i64>,
 }
 
 /// 从 tonic Request 的 mTLS peer cert 链中解析首张证书的 Subject CN。
@@ -217,7 +219,10 @@ impl Control for ControlSvc {
             }
         }
         // #36 会话事件：每条 TCP 连接的生命周期记录。upsert by id，closed_at_ms=0 → NULL（active）。
+        // 同时收集本批 forward_id 集合用于 SSE broadcast（单次心跳同 forward 多条事件 → 一次通知）。
         if !r.session_events.is_empty() {
+            let mut touched_forwards: std::collections::HashSet<i64> =
+                std::collections::HashSet::new();
             for ev in &r.session_events {
                 let hops_json = serde_json::to_string(&ev.hops_path).unwrap_or_else(|_| "[]".into());
                 let closed: Option<i64> =
@@ -252,7 +257,13 @@ impl Control for ControlSvc {
                 .await
                 {
                     tracing::warn!(session_id = %ev.id, error = %e, "session upsert failed");
+                } else {
+                    touched_forwards.insert(ev.forward_id);
                 }
+            }
+            // 仅 DB 写入成功的 forward_id 才广播；无订阅者时 send 返回 Err 也忽略。
+            for fid in touched_forwards {
+                let _ = self.sessions_tx.send(fid);
             }
         }
         // 流量 delta 累加到 forwards 表。current<last 视作 node 重启 → delta=current。
@@ -471,6 +482,9 @@ async fn main() -> Result<()> {
     let listener_states: ListenerStateView = Arc::new(RwLock::new(HashMap::new()));
     // 流量 last_reported 视图：仅 heartbeat 内部使用（不需要 API 暴露）
     let traffic_last: TrafficLastView = Arc::new(RwLock::new(HashMap::new()));
+    // SSE 通知通道：heartbeat 端 send，HTTP SSE 端 subscribe。容量 256 足够吸收
+    // 4 节点突发心跳；超过时旧消息丢弃（订阅者 Lagged → 下次 send 仍能触发 refresh）。
+    let (sessions_tx, _) = tokio::sync::broadcast::channel::<i64>(256);
 
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
@@ -487,6 +501,7 @@ async fn main() -> Result<()> {
         cert_dir: cert_dir(),
         node_caller_tls,
         listener_states: listener_states.clone(),
+        sessions_tx: sessions_tx.clone(),
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
@@ -513,6 +528,7 @@ async fn main() -> Result<()> {
         listener_states: listener_states.clone(),
         traffic_last,
         cert_dir: cert_dir(),
+        sessions_tx,
     };
     let addr = grpc_addr().parse()?;
     tracing::info!(%addr, "grpc control listening (mTLS)");

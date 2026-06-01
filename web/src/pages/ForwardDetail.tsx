@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
   Card, Table, Tabs, Tag, Space, Typography, Button, Input, DatePicker,
@@ -7,7 +7,34 @@ import {
 import { EditOutlined, ReloadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import dayjs, { Dayjs } from "dayjs";
-import { api, type Forward, type Session, type SessionsResp } from "../lib/api";
+import { api, token, type Forward, type Session, type SessionsResp } from "../lib/api";
+
+/// SSE 实时通知：master 端 forward_sessions 表变更（任意 INSERT/UPDATE）→ EventSource
+/// 触发 onRefresh，由调用方决定重拉哪个 endpoint。debounce 300ms 避免心跳里同一 forward 多
+/// 事件批量到达时连击。setInterval 兜底兜 30s（SSE 静默死掉时仍能恢复一次状态）。
+function useSessionStream(forwardId: number, onRefresh: () => void) {
+  const onRefreshRef = useRef(onRefresh);
+  onRefreshRef.current = onRefresh;
+  useEffect(() => {
+    const tk = token.get();
+    if (!tk || !forwardId) return;
+    let debounce: number | null = null;
+    const fire = () => {
+      if (debounce) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => onRefreshRef.current(), 300);
+    };
+    const url = `/api/forwards/${forwardId}/sessions/stream?token=${encodeURIComponent(tk)}`;
+    const es = new EventSource(url);
+    es.addEventListener("refresh", fire);
+    es.onerror = () => { /* EventSource 自动重连，不弹错避免打扰用户 */ };
+    const fallback = window.setInterval(() => onRefreshRef.current(), 30000);
+    return () => {
+      if (debounce) window.clearTimeout(debounce);
+      window.clearInterval(fallback);
+      es.close();
+    };
+  }, [forwardId]);
+}
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -123,6 +150,7 @@ function HistoryTab({ forwardId }: { forwardId: number }) {
   }, [forwardId, page, pageSize, clientIp, range, message]);
 
   useEffect(() => { load(); }, [load]);
+  useSessionStream(forwardId, load);
 
   return (
     <div>
@@ -176,11 +204,8 @@ function ActiveTab({ forwardId }: { forwardId: number }) {
       .finally(() => setLoading(false));
   }, [forwardId, message]);
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 3000);
-    return () => clearInterval(t);
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
+  useSessionStream(forwardId, load);
 
   const totalBytes = list.reduce((acc, s) => acc + s.bytes_in + s.bytes_out, 0);
 
@@ -189,7 +214,7 @@ function ActiveTab({ forwardId }: { forwardId: number }) {
       <Space style={{ marginBottom: 12 }}>
         <Tag color="processing">{list.length} 活跃</Tag>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          总流量 {formatBytes(totalBytes)} · 每 3 秒自动刷新
+          总流量 {formatBytes(totalBytes)} · 实时推送（SSE）
         </Text>
       </Space>
       <Table<Session>

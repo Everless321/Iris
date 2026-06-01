@@ -577,9 +577,10 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    // 心跳循环：5s 一次。同时刷新节点视图 + 同步 forward listener 状态。
+    // 心跳循环：2s 一次（含 session_events 上报，节奏决定历史/活跃数据的实时性下限）。
+    // 同时刷新节点视图 + 同步 forward listener 状态。
     let mut seq = 0u64;
-    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tick.tick().await;
         seq += 1;

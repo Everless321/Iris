@@ -1,22 +1,27 @@
 use axum::{
-    extract::{ConnectInfo, FromRef, Path, State},
+    extract::{ConnectInfo, FromRef, Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post, put},
     Json, Router,
 };
+use futures::stream::Stream;
 use tower_http::compression::CompressionLayer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tonic::transport::{ClientTlsConfig, Endpoint};
 use iris_proto::control::data_plane_client::DataPlaneClient;
 use iris_proto::control::ProbeReachRequest;
 
-use crate::auth::{hash_password, issue_token, verify_password, AdminClaims, AuthState, Claims};
+use crate::auth::{hash_password, issue_token, verify_password, verify_token, AdminClaims, AuthState, Claims};
 use crate::models::{
     parse_protocol, AuthResponse, EnrollRequest, EnrollResponse, EnrollmentToken, Forward,
     ForwardCreate, ForwardRow, Hop, InviteCode, LoginRequest, Node, NodeCreate, RegisterRequest,
@@ -33,6 +38,9 @@ pub struct AppState {
     pub cert_dir: String, // master 证书目录，供节点 enrollment 时签发新证书
     pub node_caller_tls: ClientTlsConfig, // master 反向调用节点 DataPlane 用的 mTLS
     pub listener_states: crate::ListenerStateView, // heartbeat 上报的 per-(node,forward) listener 状态
+    /// SSE 实时通道：heartbeat 写完 session 后 send(forward_id)，SSE 订阅者 filter 后 push 给浏览器。
+    /// 容量 256：突发 session 风暴时旧消息丢弃（订阅者收 Lagged）— UI 拿到任意 ping 就重拉，幂等。
+    pub sessions_tx: broadcast::Sender<i64>,
 }
 
 impl FromRef<AppState> for AuthState {
@@ -68,6 +76,7 @@ pub fn router(state: AppState) -> Router {
         // #36 会话级历史
         .route("/api/forwards/:id/sessions", get(list_forward_sessions))
         .route("/api/forwards/:id/sessions/active", get(list_active_sessions))
+        .route("/api/forwards/:id/sessions/stream", get(sessions_stream))
         .route("/api/sessions/:id", get(get_session))
         // 邀请码 & 用户管理：admin only
         .route("/api/invites", get(list_invites).post(create_invite))
@@ -749,6 +758,46 @@ async fn get_session(
     row.map(Session::from)
         .map(Json)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".into()))
+}
+
+#[derive(Deserialize)]
+pub struct SseTokenQuery {
+    token: String,
+}
+
+/// SSE 实时推送 session 变化通知。每条事件是空 ping（"refresh"），UI 收到后重拉
+/// /sessions/active + /sessions（debounce 300ms），靠后端 SQL 保证一致性，
+/// 避免客户端维护增量 patch state。
+/// 鉴权：EventSource 不能传 Authorization header，所以走 query ?token=<jwt>。
+async fn sessions_stream(
+    State(s): State<AppState>,
+    Path(forward_id): Path<i64>,
+    Query(q): Query<SseTokenQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiErr> {
+    let claims = verify_token(&s.auth, &q.token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token".into()))?;
+    if !claims.is_admin() {
+        return Err((StatusCode::FORBIDDEN, "admin only".into()));
+    }
+    // 用户被删/降级后旧 token 不应继续 stream。一次性 check 而非每条 event 都查 DB。
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
+        .bind(claims.sub)
+        .fetch_optional(&s.pool)
+        .await
+        .map_err(err)?;
+    if role.as_deref() != Some("admin") {
+        return Err((StatusCode::UNAUTHORIZED, "user not admin".into()));
+    }
+
+    let rx = s.sessions_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |msg| match msg {
+        Ok(fid) if fid == forward_id => {
+            Some(Ok(Event::default().event("refresh").data("ping")))
+        }
+        Ok(_) => None,        // 其它 forward_id 不发
+        Err(_) => None,       // Lagged 丢弃 — 下一个 send 还能触发 refresh
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 async fn list_users(_: AdminClaims, State(s): State<AppState>) -> Result<Json<Vec<UserDto>>, ApiErr> {
