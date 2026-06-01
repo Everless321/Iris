@@ -485,6 +485,10 @@ async fn main() -> Result<()> {
     // SSE 通知通道：heartbeat 端 send，HTTP SSE 端 subscribe。容量 256 足够吸收
     // 4 节点突发心跳；超过时旧消息丢弃（订阅者 Lagged → 下次 send 仍能触发 refresh）。
     let (sessions_tx, _) = tokio::sync::broadcast::channel::<i64>(256);
+    // SSE 单用 ticket 池：避免 EventSource URL 上裸 JWT。POST /sse-ticket 写入,
+    // GET /sessions/stream 消费 + 移除。容量天然受限于 ticket TTL (60s)。
+    let sse_tickets: std::sync::Arc<std::sync::Mutex<HashMap<String, api::SseTicketEntry>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
@@ -502,6 +506,7 @@ async fn main() -> Result<()> {
         node_caller_tls,
         listener_states: listener_states.clone(),
         sessions_tx: sessions_tx.clone(),
+        sse_tickets,
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");

@@ -21,7 +21,9 @@ use tonic::transport::{ClientTlsConfig, Endpoint};
 use iris_proto::control::data_plane_client::DataPlaneClient;
 use iris_proto::control::ProbeReachRequest;
 
-use crate::auth::{hash_password, issue_token, verify_password, verify_token, AdminClaims, AuthState, Claims};
+use crate::auth::{hash_password, issue_token, verify_password, AdminClaims, AuthState, Claims};
+use std::sync::Mutex;
+use uuid::Uuid;
 use crate::models::{
     parse_protocol, AuthResponse, EnrollRequest, EnrollResponse, EnrollmentToken, Forward,
     ForwardCreate, ForwardRow, Hop, InviteCode, LoginRequest, Node, NodeCreate, RegisterRequest,
@@ -41,6 +43,16 @@ pub struct AppState {
     /// SSE 实时通道：heartbeat 写完 session 后 send(forward_id)，SSE 订阅者 filter 后 push 给浏览器。
     /// 容量 256：突发 session 风暴时旧消息丢弃（订阅者收 Lagged）— UI 拿到任意 ping 就重拉，幂等。
     pub sessions_tx: broadcast::Sender<i64>,
+    /// SSE 短期单用 ticket：避免在 EventSource URL 上裸传 JWT (会进 access log / browser history)。
+    /// UI 先 POST /api/forwards/:id/sse-ticket（用 Authorization header）换 60s 一次性 ticket，
+    /// 再用 ticket 开 EventSource。消费一次即从 map 移除，过期清理在每次发新 ticket 时顺手做。
+    pub sse_tickets: Arc<Mutex<HashMap<String, SseTicketEntry>>>,
+}
+
+#[derive(Clone)]
+pub struct SseTicketEntry {
+    pub forward_id: i64,
+    pub exp_ms: i64,
 }
 
 impl FromRef<AppState> for AuthState {
@@ -76,6 +88,7 @@ pub fn router(state: AppState) -> Router {
         // #36 会话级历史
         .route("/api/forwards/:id/sessions", get(list_forward_sessions))
         .route("/api/forwards/:id/sessions/active", get(list_active_sessions))
+        .route("/api/forwards/:id/sse-ticket", post(issue_sse_ticket))
         .route("/api/forwards/:id/sessions/stream", get(sessions_stream))
         .route("/api/sessions/:id", get(get_session))
         // 邀请码 & 用户管理：admin only
@@ -761,32 +774,53 @@ async fn get_session(
 }
 
 #[derive(Deserialize)]
-pub struct SseTokenQuery {
-    token: String,
+pub struct SseTicketQuery {
+    ticket: String,
+}
+
+#[derive(Serialize)]
+pub struct SseTicketResp {
+    pub ticket: String,
+    pub expires_in: u64,
+}
+
+/// 发放 SSE 单用 ticket，避免把 JWT 直接放进 EventSource URL（会落进 access log / 浏览器历史）。
+/// 用 Authorization header 走标准 admin auth，返回 60s opaque ticket，UI 紧接着开 EventSource。
+async fn issue_sse_ticket(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(forward_id): Path<i64>,
+) -> Result<Json<SseTicketResp>, ApiErr> {
+    let ticket = Uuid::new_v4().to_string();
+    let now = now_ms();
+    let exp_ms = now + 60_000;
+    {
+        let mut g = s.sse_tickets.lock().unwrap();
+        g.retain(|_, e| e.exp_ms > now); // 顺手清过期，O(n) 但 ticket 量极小
+        g.insert(ticket.clone(), SseTicketEntry { forward_id, exp_ms });
+    }
+    Ok(Json(SseTicketResp { ticket, expires_in: 60 }))
 }
 
 /// SSE 实时推送 session 变化通知。每条事件是空 ping（"refresh"），UI 收到后重拉
-/// /sessions/active + /sessions（debounce 300ms），靠后端 SQL 保证一致性，
-/// 避免客户端维护增量 patch state。
-/// 鉴权：EventSource 不能传 Authorization header，所以走 query ?token=<jwt>。
+/// /sessions/active + /sessions（debounce 300ms），靠后端 SQL 保证一致性。
+/// 鉴权：ticket 从 query string 取，consumed 一次后从 map 移除（single-use）。
 async fn sessions_stream(
     State(s): State<AppState>,
     Path(forward_id): Path<i64>,
-    Query(q): Query<SseTokenQuery>,
+    Query(q): Query<SseTicketQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiErr> {
-    let claims = verify_token(&s.auth, &q.token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token".into()))?;
-    if !claims.is_admin() {
-        return Err((StatusCode::FORBIDDEN, "admin only".into()));
+    let now = now_ms();
+    let entry = {
+        let mut g = s.sse_tickets.lock().unwrap();
+        g.remove(&q.ticket) // single-use
+    };
+    let entry = entry.ok_or((StatusCode::UNAUTHORIZED, "invalid or used ticket".into()))?;
+    if entry.exp_ms < now {
+        return Err((StatusCode::UNAUTHORIZED, "ticket expired".into()));
     }
-    // 用户被删/降级后旧 token 不应继续 stream。一次性 check 而非每条 event 都查 DB。
-    let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
-        .bind(claims.sub)
-        .fetch_optional(&s.pool)
-        .await
-        .map_err(err)?;
-    if role.as_deref() != Some("admin") {
-        return Err((StatusCode::UNAUTHORIZED, "user not admin".into()));
+    if entry.forward_id != forward_id {
+        return Err((StatusCode::FORBIDDEN, "ticket forward mismatch".into()));
     }
 
     let rx = s.sessions_tx.subscribe();

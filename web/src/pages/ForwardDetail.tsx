@@ -7,31 +7,60 @@ import {
 import { EditOutlined, ReloadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import dayjs, { Dayjs } from "dayjs";
-import { api, token, type Forward, type Session, type SessionsResp } from "../lib/api";
+import { api, type Forward, type Session, type SessionsResp } from "../lib/api";
 
 /// SSE 实时通知：master 端 forward_sessions 表变更（任意 INSERT/UPDATE）→ EventSource
-/// 触发 onRefresh，由调用方决定重拉哪个 endpoint。debounce 300ms 避免心跳里同一 forward 多
-/// 事件批量到达时连击。setInterval 兜底兜 30s（SSE 静默死掉时仍能恢复一次状态）。
+/// 触发 onRefresh。重连流程：拉 60s 单用 ticket → 开 EventSource → 失败/断开 → 重拉 ticket 再连。
+/// 单用 ticket 避免 JWT 进 URL/access-log/history。debounce 300ms 抑制心跳里 burst 连击；
+/// fallback 30s setInterval 兜底以防 SSE 静默死掉。
 function useSessionStream(forwardId: number, onRefresh: () => void) {
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
   useEffect(() => {
-    const tk = token.get();
-    if (!tk || !forwardId) return;
+    if (!forwardId) return;
+    let cancelled = false;
+    let es: EventSource | null = null;
     let debounce: number | null = null;
+    let reconnectTimer: number | null = null;
+
     const fire = () => {
       if (debounce) window.clearTimeout(debounce);
       debounce = window.setTimeout(() => onRefreshRef.current(), 300);
     };
-    const url = `/api/forwards/${forwardId}/sessions/stream?token=${encodeURIComponent(tk)}`;
-    const es = new EventSource(url);
-    es.addEventListener("refresh", fire);
-    es.onerror = () => { /* EventSource 自动重连，不弹错避免打扰用户 */ };
+
+    const connect = async () => {
+      try {
+        const { ticket } = await api.post<{ ticket: string }>(
+          `/api/forwards/${forwardId}/sse-ticket`,
+          {},
+        );
+        if (cancelled) return;
+        const url = `/api/forwards/${forwardId}/sessions/stream?ticket=${encodeURIComponent(ticket)}`;
+        es = new EventSource(url);
+        es.addEventListener("refresh", fire);
+        es.onerror = () => {
+          // ticket 单用，断了一定要重换。close 当前 ES，3s 后重连（避免 hammer）。
+          es?.close();
+          es = null;
+          if (cancelled) return;
+          reconnectTimer = window.setTimeout(connect, 3000);
+        };
+      } catch {
+        // ticket 拉取失败（401 / 网络）静默重试。
+        if (cancelled) return;
+        reconnectTimer = window.setTimeout(connect, 10000);
+      }
+    };
+
+    connect();
     const fallback = window.setInterval(() => onRefreshRef.current(), 30000);
+
     return () => {
+      cancelled = true;
       if (debounce) window.clearTimeout(debounce);
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
       window.clearInterval(fallback);
-      es.close();
+      es?.close();
     };
   }, [forwardId]);
 }
