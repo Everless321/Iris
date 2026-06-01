@@ -4,6 +4,7 @@
   <p><strong>高性能、生产级的多级转发控制平台</strong></p>
   <p>智能调度 · 全链路 mTLS · 自动续签 · 实时流量统计</p>
 
+[![CI](https://github.com/Everless321/Iris/actions/workflows/musl-build.yml/badge.svg)](https://github.com/Everless321/Iris/actions/workflows/musl-build.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
