@@ -115,13 +115,14 @@ impl FastPathManager for NftFastPath {
         };
         let ip = rule.target_addr.ip();
         let port = rule.target_addr.port();
-        // IPv6 IP 需要用 [..] 包裹，nft 兼容 RFC 2732
-        let ip_str = match ip {
-            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
-            std::net::IpAddr::V4(v4) => v4.to_string(),
+        // inet 表混合 v4/v6，dnat 必须显式 ip/ip6 限定 family（否则报
+        // "ip or ip6 must be specified with address for inet tables"）。
+        let (family_qual, ip_str) = match ip {
+            std::net::IpAddr::V4(v4) => ("ip", v4.to_string()),
+            std::net::IpAddr::V6(v6) => ("ip6", format!("[{v6}]")),
         };
         let script = format!(
-            "add rule inet {TABLE} prerouting {proto} dport {} counter dnat to {ip_str}:{} \
+            "add rule inet {TABLE} prerouting {proto} dport {} counter dnat {family_qual} to {ip_str}:{} \
              comment \"iris-fwd-{}\"\n",
             rule.listen_port, port, rule.forward_id
         );
