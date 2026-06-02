@@ -63,9 +63,17 @@ curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- \
 
 脚本会：自动检测架构 → 下载 `iris-node` → 调 enroll API 兑换 mTLS 证书 → 写 systemd unit → 启动服务。**约 30 秒节点上线**。
 
+> `/install.sh` 端点是 302 redirect 到 [仓库根 `install.sh`](install.sh)（脚本 source of truth）。
+> master 离线时也可直接用：`curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- ...`
+
 **升级节点**：
 ```bash
 curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- --upgrade
+```
+
+**升级 master**（同一脚本，在 master 主机上跑）：
+```bash
+curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- --upgrade-master
 ```
 
 **卸载节点**（自动备份 cert + 配置到 `/tmp/iris-uninstall-*.tar.gz`）：

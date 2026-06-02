@@ -610,21 +610,21 @@ async fn enroll_node(
     }))
 }
 
-/// 安装脚本（公开端点）。生产强制 HTTPS 同 enroll 端点。
+/// 安装脚本（公开端点）。脚本本体托管在 GitHub raw（主仓库 main 分支或 IRIS_INSTALL_SCRIPT_URL
+/// 覆盖），此端点仅做 302 redirect：脚本改动不再需要 rebuild master，且 master 离线也不影响新装节点。
+/// 生产强制 HTTPS 同 enroll 端点。
 async fn install_script(headers: axum::http::HeaderMap) -> axum::response::Response {
-    use axum::response::IntoResponse;
+    use axum::response::{IntoResponse, Redirect};
     if std::env::var("IRIS_REQUIRE_TLS").as_deref() == Ok("1") {
         let xfp = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok());
         if xfp != Some("https") {
             return (StatusCode::FORBIDDEN, "请使用 HTTPS 访问 /install.sh").into_response();
         }
     }
-    let body = include_str!("../assets/install-node.sh");
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
-        body,
-    )
-        .into_response()
+    let url = std::env::var("IRIS_INSTALL_SCRIPT_URL").unwrap_or_else(|_| {
+        "https://raw.githubusercontent.com/Everless321/Iris/main/install.sh".to_string()
+    });
+    Redirect::temporary(&url).into_response()
 }
 
 // ---- #36 sessions ----
