@@ -30,9 +30,6 @@ bytes = "1"
 uuid = { version = "1", features = ["v4"] }
 # #39 token-bucket 速率限制（per-forward in/out 独立 bucket，read/write 前 await ready）
 governor = "0.6"
-# M4 fastpath capability JSON 序列化
+# M4 fastpath capability JSON 序列化 + nft -j list ruleset 解析
 serde = { workspace = true }
 serde_json = { workspace = true }
-# M4.2-B 内核态 nftables 规则下发 — 仅 Linux 编进；其他平台 stub
-[target.'cfg(target_os = "linux")'.dependencies]
-rustables = "0.8"
