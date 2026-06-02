@@ -121,6 +121,9 @@ message ForwardRule {
   // #27 节点间链路加密开关。"" / "tls" = TLS（默认）；"plain" = TCP 不裹 TLS（同机房）。
   // 仅影响 TCP raw_tunnel；UDP/QUIC 无视该字段，永远 TLS。
   string link_encryption = 11;
+  // M4.2 转发路径模式。"auto"（默认）/ "fast" / "slow"。节点据此选择 nftables fast path
+  // 还是 tokio user-space。条件不满足时 fast → 自动 fallback slow，节点上报实际路径。
+  string path_mode = 12;
 }
 
 message TargetEndpoint {

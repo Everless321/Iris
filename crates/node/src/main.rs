@@ -38,6 +38,9 @@ struct ActiveForward {
     handles: Vec<JoinHandle<()>>,
     status: ListenerState,
     traffic: Arc<dataplane::TrafficCounter>,
+    /// M4.2 实际生效路径："slow"（用户态 tokio）/ "fast"（内核 nftables DNAT）。
+    /// 用于 heartbeat 上报 + 析构时 fastpath.delete_rule。
+    actual_path: String,
 }
 
 /// listener task 内 bind 完成后,通过 oneshot 把 bind 结果上报给 spawn_forward，
@@ -55,6 +58,35 @@ async fn await_bind(rx: tokio::sync::oneshot::Receiver<Result<(), String>>) -> R
 /// 仅当本节点是 hops[0]（入口）且 targets 非空时启动；否则返回 None。
 ///
 /// async：spawn 后通过 oneshot 等真实 bind 结果回报，status.ok 反映实际 bind 成败。
+/// M4.2 fast path 资格判定：单跳 + 单 target + 节点支持 + 非 TLS 且模式允许。
+/// path_mode 'auto' → 需 plain；'fast' → 强制尝试；'slow' → 永远不走。
+/// 不满足任意条件返回 None（→ slow path）。
+fn qualifies_for_fastpath(
+    f: &ForwardRule,
+    fastpath: &Arc<dyn fastpath::FastPathManager>,
+) -> bool {
+    if !fastpath.is_available() {
+        return false;
+    }
+    if f.hops.len() != 1 {
+        return false; // multi-hop 内核态无法终结 + 加密
+    }
+    // 多协议（tcp+udp）暂不支持，需要两条规则；V2 再做
+    let proto = f.protocol.trim();
+    if proto != "tcp" && proto != "udp" {
+        return false;
+    }
+    // 多 target / failover：内核 DNAT 一对一，多 target 留 slow
+    if f.targets.len() != 1 {
+        return false;
+    }
+    match f.path_mode.as_str() {
+        "slow" => false,
+        "fast" => true,
+        _ => f.link_encryption == "plain", // auto：仅 plain 模式下用 fast
+    }
+}
+
 async fn spawn_forward(
     f: &ForwardRule,
     node_id: &str,
@@ -63,6 +95,7 @@ async fn spawn_forward(
     target_router: &Arc<dataplane::TargetRouter>,
     sessions: &Arc<session::SessionTable>,
     entry_node_id_arc: &Arc<String>,
+    fastpath: &Arc<dyn fastpath::FastPathManager>,
 ) -> Option<ActiveForward> {
     let is_entry = f
         .hops
@@ -109,6 +142,46 @@ async fn spawn_forward(
     let traffic = Arc::new(dataplane::TrafficCounter::default());
     // #39 per-forward 速率限制（TCP 和 UDP 共享同一份 bucket；0 = 该方向不限）
     let rate = Arc::new(ratelimit::RateLimit::new(f.rate_in_bps, f.rate_out_bps));
+
+    // M4.2 fast path 尝试：满足条件 → 下 nft 规则；失败立即 fallthrough slow path
+    if qualifies_for_fastpath(f, fastpath) {
+        let target = &targets[0];
+        match target.addr.parse::<std::net::SocketAddr>() {
+            Ok(sa) => {
+                let rule = fastpath::FastPathRule {
+                    forward_id: fid,
+                    protocol: f.protocol.clone(),
+                    listen_port: port,
+                    target_addr: sa,
+                };
+                match fastpath.add_rule(&rule) {
+                    Ok(()) => {
+                        tracing::info!(forward_id = fid, port, target = %sa, "fast path nft rule installed");
+                        return Some(ActiveForward {
+                            rule: f.clone(),
+                            handles: Vec::new(), // kernel 转发，无 task
+                            status: ListenerState {
+                                forward_id: fid,
+                                port: port as u32,
+                                protocol: f.protocol.clone(),
+                                ok: true,
+                                error: String::new(),
+                            },
+                            traffic,
+                            actual_path: "fast".into(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(forward_id = fid, error = %e, "fast path add_rule failed, fallback to slow");
+                        // 继续往下走 slow path
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(forward_id = fid, target = %target.addr, error = %e, "target addr parse failed, slow path");
+            }
+        }
+    }
 
     if has_tcp {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -216,6 +289,7 @@ async fn spawn_forward(
                 error: first_err,
             },
             traffic,
+            actual_path: "slow".into(),
         });
     }
 
@@ -230,6 +304,7 @@ async fn spawn_forward(
             error: String::new(),
         },
         traffic,
+        actual_path: "slow".into(),
     })
 }
 
@@ -259,7 +334,13 @@ fn collect_traffic_stats(active: &HashMap<i64, ActiveForward>) -> Vec<TrafficSta
 /// abort 一个 ActiveForward 的所有 listener task,并 await 它们 unwind（含 TcpListener/UdpSocket Drop
 /// 释放 fd）。tokio::JoinHandle::abort() 只发 cancellation flag,fd 真正释放要等 task await 退出 +
 /// 局部变量 Drop —— 直接接着 bind 同一端口 100% EADDRINUSE。timeout 2s 防止卡死 reconcile。
-async fn shutdown_active(af: ActiveForward) {
+async fn shutdown_active(af: ActiveForward, fastpath: &Arc<dyn fastpath::FastPathManager>) {
+    // M4.2 fast path 节点端拆 nft 规则
+    if af.actual_path == "fast" {
+        if let Err(e) = fastpath.delete_rule(af.rule.id) {
+            tracing::warn!(forward_id = af.rule.id, error = %e, "fastpath delete_rule failed");
+        }
+    }
     for h in &af.handles {
         h.abort();
     }
@@ -277,6 +358,7 @@ async fn reconcile_forwards(
     target_router: &Arc<dataplane::TargetRouter>,
     sessions: &Arc<session::SessionTable>,
     entry_node_id_arc: &Arc<String>,
+    fastpath: &Arc<dyn fastpath::FastPathManager>,
 ) {
     let new_ids: std::collections::HashSet<i64> = new_forwards.iter().map(|f| f.id).collect();
 
@@ -289,7 +371,7 @@ async fn reconcile_forwards(
     for id in to_remove {
         if let Some(af) = active.remove(&id) {
             let port = af.rule.listen_port;
-            shutdown_active(af).await;
+            shutdown_active(af, fastpath).await;
             tracing::info!(forward_id = id, port, "forward removed: listener stopped");
         }
     }
@@ -305,7 +387,7 @@ async fn reconcile_forwards(
 
         if !still_entry {
             if let Some(af) = active.remove(&fid) {
-                shutdown_active(af).await;
+                shutdown_active(af, fastpath).await;
                 tracing::info!(forward_id = fid, "no longer entry: listener stopped");
             }
             continue;
@@ -321,7 +403,7 @@ async fn reconcile_forwards(
             // rule 变化 OR 上次 bind 失败 → 必须先 await 旧 task 完全退出，否则新 bind = EADDRINUSE
             if let Some(af) = active.remove(&fid) {
                 let (old_port, prev_ok) = (af.rule.listen_port, af.status.ok);
-                shutdown_active(af).await;
+                shutdown_active(af, fastpath).await;
                 tracing::info!(
                     forward_id = fid,
                     old_port,
@@ -334,7 +416,7 @@ async fn reconcile_forwards(
 
         // spawn 新 listener（spawn_forward 内部 await 真实 bind 结果回报）
         if let Some(af) =
-            spawn_forward(f, node_id, ctx, lb, target_router, sessions, entry_node_id_arc).await
+            spawn_forward(f, node_id, ctx, lb, target_router, sessions, entry_node_id_arc, fastpath).await
         {
             tracing::info!(
                 forward_id = fid,
@@ -591,6 +673,14 @@ async fn main() -> Result<()> {
     let fastpath_cap = fastpath::probe::detect();
     tracing::info!(fastpath = fastpath_cap.fastpath, reason = %fastpath_cap.reason, kernel = %fastpath_cap.kernel, "fastpath probe");
     let fastpath_cap_json = fastpath_cap.to_json();
+    let fastpath_mgr = fastpath::new_manager();
+    if fastpath_cap.fastpath {
+        if let Err(e) = fastpath_mgr.init() {
+            tracing::warn!(error = %e, "fastpath init failed — falling back to slow path globally");
+        } else {
+            tracing::info!("fast path enabled: kernel nftables DNAT will serve qualified forwards");
+        }
+    }
 
     // 启动入口监听器 + 后续 sync_config 时 reconcile（热加载，无需 restart node）
     let mut active_forwards: HashMap<i64, ActiveForward> = HashMap::new();
@@ -603,6 +693,7 @@ async fn main() -> Result<()> {
         &target_router,
         &session_table,
         &entry_node_id_arc,
+        &fastpath_mgr,
     )
     .await;
 
@@ -646,6 +737,7 @@ async fn main() -> Result<()> {
                 &target_router,
                 &session_table,
                 &entry_node_id_arc,
+                &fastpath_mgr,
             )
             .await;
         }

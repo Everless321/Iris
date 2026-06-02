@@ -640,6 +640,11 @@ impl Control for ControlSvc {
                 } else {
                     r.link_encryption
                 };
+                let path_mode = if r.path_mode.is_empty() {
+                    "auto".into()
+                } else {
+                    r.path_mode
+                };
                 #[allow(deprecated)]
                 Some(ForwardRule {
                     id: r.id,
@@ -653,6 +658,7 @@ impl Control for ControlSvc {
                     rate_in_bps,
                     rate_out_bps,
                     link_encryption,
+                    path_mode,
                 })
             })
             .collect();

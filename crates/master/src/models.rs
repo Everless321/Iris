@@ -120,6 +120,9 @@ pub struct ForwardRow {
     /// migration 0012 #27 节点间链路加密。'tls' (默认) | 'plain'
     #[sqlx(default)]
     pub link_encryption: String,
+    /// migration 0014 M4.2 转发路径模式。'auto' (默认) | 'fast' | 'slow'
+    #[sqlx(default)]
+    pub path_mode: String,
 }
 
 impl ForwardRow {
@@ -199,6 +202,9 @@ pub struct Forward {
     /// #27 节点间链路加密。'tls' (默认) | 'plain'
     #[serde(default)]
     pub link_encryption: String,
+    /// M4.2 转发路径模式。'auto' (默认) | 'fast' | 'slow'
+    #[serde(default)]
+    pub path_mode: String,
 }
 
 /// 单个入口节点的 listener 状态。前端 forward list 显示徽章 + tooltip。
@@ -245,6 +251,11 @@ impl From<ForwardRow> for Forward {
             } else {
                 r.link_encryption
             },
+            path_mode: if r.path_mode.is_empty() {
+                "auto".into()
+            } else {
+                r.path_mode
+            },
         }
     }
 }
@@ -283,6 +294,9 @@ pub struct ForwardCreate {
     /// #27 节点间链路加密。'tls' | 'plain'。admin-only。
     #[serde(default)]
     pub link_encryption: Option<String>,
+    /// M4.2 转发路径模式。'auto' | 'fast' | 'slow'。admin-only。
+    #[serde(default)]
+    pub path_mode: Option<String>,
 }
 
 impl ForwardCreate {

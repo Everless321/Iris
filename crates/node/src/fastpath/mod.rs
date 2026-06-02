@@ -55,6 +55,7 @@ pub struct CounterSnapshot {
 }
 
 /// fast path 控制接口。Linux 端走 nft shell；非 Linux 走 noop（probe 已挡，不应被调）。
+#[allow(dead_code)] // cleanup/get_counters 由 M4.2-D + 优雅 shutdown 调用
 pub trait FastPathManager: Send + Sync {
     /// 启动期：建 `inet iris` table + nat chain。idempotent，先 delete 再 add。
     fn init(&self) -> Result<()>;

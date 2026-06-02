@@ -405,7 +405,8 @@ async fn create_forward(
     let now = now_ms();
     // #39 quota / rate / 重置策略：仅 admin 可设置。customer 创建时强制 None（之后 admin 来加）。
     // #27 link_encryption：admin 可设，customer 强制 'tls'。
-    let (eff_qin, eff_qout, eff_rin, eff_rout, eff_qreset, eff_qreset_at, eff_link_enc) = if claims.is_admin() {
+    // M4.2 path_mode：admin 可设，customer 强制 'auto'。
+    let (eff_qin, eff_qout, eff_rin, eff_rout, eff_qreset, eff_qreset_at, eff_link_enc, eff_path_mode) = if claims.is_admin() {
         let qr = normalize_quota_reset(f.quota_reset.as_deref());
         let qra = crate::compute_next_reset_at_ms(qr.as_deref(), now);
         (
@@ -413,16 +414,17 @@ async fn create_forward(
             nz_opt(f.rate_in_bps), nz_opt(f.rate_out_bps),
             qr, qra,
             normalize_link_encryption(f.link_encryption.as_deref()),
+            normalize_path_mode(f.path_mode.as_deref()),
         )
     } else {
-        (None, None, None, None, None, None, "tls".into())
+        (None, None, None, None, None, None, "tls".into(), "auto".into())
     };
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO forwards \
          (name,listen_port,protocol,path,target,target_strategy,enabled,created_at,owner_id, \
           quota_in_bytes,quota_out_bytes,rate_in_bps,rate_out_bps,quota_reset,quota_reset_at_ms, \
-          link_encryption) \
-         VALUES (?,?,?,?,?,?,1,?,?, ?,?,?,?,?,?, ?) RETURNING id",
+          link_encryption, path_mode) \
+         VALUES (?,?,?,?,?,?,1,?,?, ?,?,?,?,?,?, ?,?) RETURNING id",
     )
     .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
     .bind(&targets_json).bind(&f.target_strategy).bind(now).bind(claims.sub)
@@ -430,6 +432,7 @@ async fn create_forward(
     .bind(eff_rin).bind(eff_rout)
     .bind(&eff_qreset).bind(eff_qreset_at)
     .bind(&eff_link_enc)
+    .bind(&eff_path_mode)
     .fetch_one(&s.pool).await
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
@@ -452,6 +455,7 @@ async fn create_forward(
         quota_reset_at_ms: eff_qreset_at,
         quota_exhausted_at_ms: None,
         link_encryption: eff_link_enc,
+        path_mode: eff_path_mode,
     }))
 }
 
@@ -465,6 +469,15 @@ fn normalize_link_encryption(v: Option<&str>) -> String {
     match v.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("plain") => "plain".into(),
         _ => "tls".into(),
+    }
+}
+
+/// 规范化 path_mode：'fast' / 'slow' 透传，其余 → 'auto'。
+fn normalize_path_mode(v: Option<&str>) -> String {
+    match v.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("fast") => "fast".into(),
+        Some("slow") => "slow".into(),
+        _ => "auto".into(),
     }
 }
 
@@ -533,7 +546,7 @@ async fn update_forward(
     // #39 quota / rate / 重置策略：admin 可调，customer 不可（否则可绕过自己被管理员设置的限额）。
     // #27 link_encryption 同样 admin-only。
     // customer 改其它字段时，quota_* / link_encryption 全部用 DB 旧值覆盖入参。
-    let (eff_qin, eff_qout, eff_rin, eff_rout, eff_qreset, eff_qreset_at, eff_link_enc) = if claims.is_admin() {
+    let (eff_qin, eff_qout, eff_rin, eff_rout, eff_qreset, eff_qreset_at, eff_link_enc, eff_path_mode) = if claims.is_admin() {
         let qr = normalize_quota_reset(f.quota_reset.as_deref());
         let qra = crate::compute_next_reset_at_ms(qr.as_deref(), now_ms());
         (
@@ -541,12 +554,13 @@ async fn update_forward(
             nz_opt(f.rate_in_bps), nz_opt(f.rate_out_bps),
             qr, qra,
             normalize_link_encryption(f.link_encryption.as_deref()),
+            normalize_path_mode(f.path_mode.as_deref()),
         )
     } else {
-        let row: (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<i64>, String) =
+        let row: (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<i64>, String, String) =
             sqlx::query_as(
                 "SELECT quota_in_bytes, quota_out_bytes, rate_in_bps, rate_out_bps, \
-                 quota_reset, quota_reset_at_ms, link_encryption FROM forwards WHERE id=?",
+                 quota_reset, quota_reset_at_ms, link_encryption, path_mode FROM forwards WHERE id=?",
             )
             .bind(id).fetch_one(&s.pool).await.map_err(err)?;
         row
@@ -554,7 +568,7 @@ async fn update_forward(
     sqlx::query(
         "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=?, target_strategy=?, \
          quota_in_bytes=?, quota_out_bytes=?, rate_in_bps=?, rate_out_bps=?, \
-         quota_reset=?, quota_reset_at_ms=?, link_encryption=? \
+         quota_reset=?, quota_reset_at_ms=?, link_encryption=?, path_mode=? \
          WHERE id=?",
     )
     .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
@@ -562,7 +576,7 @@ async fn update_forward(
     .bind(eff_qin).bind(eff_qout)
     .bind(eff_rin).bind(eff_rout)
     .bind(&eff_qreset).bind(eff_qreset_at)
-    .bind(&eff_link_enc)
+    .bind(&eff_link_enc).bind(&eff_path_mode)
     .bind(id)
     .execute(&s.pool).await
     .map_err(|e| {
