@@ -223,8 +223,12 @@ do_install() {
   mkdir -p "$INSTALL_DIR/certs" "$INSTALL_DIR/data"
 
   info "向 master 兑换证书 ($MASTER) ..."
+  # enroll 是 trust-on-first-use 一次性步骤：master 用自签 CA，本机此刻没该 CA。
+  # 用 -k 跳过 cert 校验拿 response（含 CA + identity cert + key）；
+  # 后续节点 ↔ master gRPC 用 response 里的 CA 严格校验，不再 insecure。
+  # MITM 风险：仅限 enrollment 窗口（token 有效期内）+ 仅 1 token，可接受。
   local resp
-  resp=$(curl -fsS -X POST "$MASTER/api/nodes/enroll" \
+  resp=$(curl -fsSk -X POST "$MASTER/api/nodes/enroll" \
     -H 'content-type: application/json' \
     -d "{\"token\":\"$TOKEN\"}") \
     || die "enroll API 失败（token 已过期/已用/无效？或网络不通）"
