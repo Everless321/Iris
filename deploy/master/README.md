@@ -1,6 +1,31 @@
 # Master 部署模板
 
-## 安装步骤
+## 推荐：一键安装
+
+自动生成 admin 密码 + JWT 密钥 + systemd unit + 健康检查 + 打印登录凭据：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --install-master
+```
+
+可选参数（不传则随机生成并明文打印一次）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --install-master \
+  --admin-user admin \
+  --admin-pass <your-pass> \
+  --jwt-secret $(openssl rand -hex 32)
+```
+
+升级现有 master 用 `--upgrade-master`（同一脚本，备份 + 替换 + 重启 + 失败自动回滚）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --upgrade-master
+```
+
+## 手工安装（备用 / 高级）
+
+不想 `curl | sudo bash`，或要做定制（如 `IRIS_REQUIRE_TLS=1` / `IRIS_SESSION_RETAIN_DAYS`）：
 
 ```bash
 # 1. 准备目录 + 配置
