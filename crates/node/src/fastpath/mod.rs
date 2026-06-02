@@ -48,6 +48,7 @@ pub struct FastPathRule {
 /// 单 forward 的内核态 counter 快照。bytes_in = PREROUTING 命中 DNAT 前的客户端→target 字节数。
 /// bytes_out V2 再加（需 conntrack 反向 SNAT counter，先记 0）。
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // forward_id 在 HashMap key 引用；bytes_out 留 V2
 pub struct CounterSnapshot {
     pub forward_id: i64,
     pub bytes_in: u64,

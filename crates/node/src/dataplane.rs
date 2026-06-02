@@ -26,6 +26,17 @@ impl TrafficCounter {
     pub fn add_out(&self, n: usize) {
         self.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
     }
+    /// M4.2-D fast path 用：把 kernel counter 绝对值灌进来。
+    /// 与 add_in/add_out 互斥使用（fast forward 只用 set_absolute，slow forward 只用 add_*）。
+    #[inline]
+    pub fn set_in_absolute(&self, n: u64) {
+        self.bytes_in.store(n, Ordering::Relaxed);
+    }
+    #[allow(dead_code)] // V2 反向 counter 用
+    #[inline]
+    pub fn set_out_absolute(&self, n: u64) {
+        self.bytes_out.store(n, Ordering::Relaxed);
+    }
 }
 
 use crate::sock;

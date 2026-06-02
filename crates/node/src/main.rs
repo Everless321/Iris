@@ -704,6 +704,22 @@ async fn main() -> Result<()> {
     loop {
         tick.tick().await;
         seq += 1;
+        // M4.2-D fast path counter 拉取：每个 heartbeat tick 同步 nft counter → ActiveForward.traffic
+        // get_counters 失败不阻塞 heartbeat（log warn 即可，下轮再试）
+        if fastpath_mgr.is_available() {
+            match fastpath_mgr.get_counters() {
+                Ok(snap) => {
+                    for (fid, cs) in &snap {
+                        if let Some(af) = active_forwards.get(fid) {
+                            if af.actual_path == "fast" {
+                                af.traffic.set_in_absolute(cs.bytes_in);
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "fastpath counters poll failed"),
+            }
+        }
         let listener_states = collect_listener_states(&active_forwards);
         let traffic_stats = collect_traffic_stats(&active_forwards);
         if let Err(e) = client
