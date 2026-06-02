@@ -72,6 +72,12 @@ export default function Forwards() {
       render: (_, f) => <TrafficCell f={f} />,
     },
     {
+      title: "配额",
+      key: "quota",
+      width: 150,
+      render: (_, f) => <QuotaCell f={f} />,
+    },
+    {
       title: "目标",
       key: "targets",
       width: 220,
@@ -244,4 +250,78 @@ function PathInline({ f }: { f: Forward }) {
       })}
     </Space>
   );
+}
+
+/// #39 配额状态 cell：耗尽红 tag / 接近 80% 黄 / 正常绿 / 无限灰；含速率 / 重置倒计时 tooltip。
+function QuotaCell({ f }: { f: Forward }) {
+  const qin = f.quota_in_bytes ?? null;
+  const qout = f.quota_out_bytes ?? null;
+  const rin = f.rate_in_bps ?? null;
+  const rout = f.rate_out_bps ?? null;
+  const exhausted = f.quota_exhausted_at_ms != null;
+  const hasAny = qin != null || qout != null || rin != null || rout != null;
+
+  if (!hasAny) {
+    return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+  }
+
+  const usedIn = f.bytes_in ?? 0;
+  const usedOut = f.bytes_out ?? 0;
+  const pctIn = qin ? Math.min(100, Math.round((usedIn / qin) * 100)) : 0;
+  const pctOut = qout ? Math.min(100, Math.round((usedOut / qout) * 100)) : 0;
+  const worst = Math.max(pctIn, pctOut);
+
+  let color: "success" | "warning" | "error" | "default" = "success";
+  let label = "正常";
+  if (exhausted) { color = "error"; label = "已耗尽"; }
+  else if (worst >= 80 && (qin || qout)) { color = "warning"; label = `${worst}% 已用`; }
+  else if (qin || qout) { color = "success"; label = `${worst}% 已用`; }
+  else { color = "default"; label = "仅限速"; }
+
+  const tip = (
+    <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+      {qin != null && (
+        <div>上传 quota: {formatBytesGB(usedIn)} / {formatBytesGB(qin)}</div>
+      )}
+      {qout != null && (
+        <div>下载 quota: {formatBytesGB(usedOut)} / {formatBytesGB(qout)}</div>
+      )}
+      {rin != null && rin > 0 && <div>上传带宽: {formatRate(rin)}</div>}
+      {rout != null && rout > 0 && <div>下载带宽: {formatRate(rout)}</div>}
+      {f.quota_reset && (
+        <div>重置策略: {f.quota_reset === "daily" ? "每日 UTC 00:00" : "每月 1 号 UTC 00:00"}</div>
+      )}
+      {f.quota_reset_at_ms != null && (
+        <div style={{ marginTop: 4, color: "#999" }}>
+          下次重置: {new Date(f.quota_reset_at_ms).toLocaleString()}
+        </div>
+      )}
+      {exhausted && f.quota_exhausted_at_ms != null && (
+        <div style={{ marginTop: 4, color: "#ff7875" }}>
+          软停于 {new Date(f.quota_exhausted_at_ms).toLocaleString()}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <Tooltip title={tip} placement="left">
+      <Tag color={color} style={{ margin: 0, fontSize: 11, cursor: "help" }}>
+        {label}
+      </Tag>
+    </Tooltip>
+  );
+}
+
+function formatBytesGB(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 ** 2) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+  return `${(b / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function formatRate(bps: number): string {
+  if (bps < 1024) return `${bps} B/s`;
+  if (bps < 1024 ** 2) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${(bps / 1024 ** 2).toFixed(2)} MB/s`;
 }

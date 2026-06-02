@@ -89,6 +89,14 @@ export type Forward = {
   listener_status?: ListenerNodeStatus[];
   bytes_in?: number;
   bytes_out?: number;
+  // #39 流量限制（admin only 可设；customer 看 read-only）
+  quota_in_bytes?: number | null;
+  quota_out_bytes?: number | null;
+  rate_in_bps?: number | null;
+  rate_out_bps?: number | null;
+  quota_reset?: "daily" | "monthly" | null;
+  quota_reset_at_ms?: number | null;
+  quota_exhausted_at_ms?: number | null;
 };
 export type Enrollment = {
   token: string;

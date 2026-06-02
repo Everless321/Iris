@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   Card, Form, Input, InputNumber, Select, Button, Space, Typography,
-  App, Tag, Drawer, Popconfirm, Empty, Checkbox,
+  App, Tag, Drawer, Popconfirm, Empty, Checkbox, Alert, Progress,
 } from "antd";
 import {
   ArrowLeftOutlined, SaveOutlined, PlusOutlined, CloseOutlined,
@@ -390,6 +390,11 @@ export default function TopologyEditor() {
   // 编辑模式下，数据未加载完前不要构建 RF 节点，否则 target/hops 会按默认长度 1
   // 占位置，等真实数据到达时缓存的 target 位置不会重算 → 和新 hop 重叠堆叠。
   const [pageReady, setPageReady] = useState(!id);
+  // #39 编辑模式下保留服务端返回的 forward 快照，用于：
+  // - customer 看 read-only 配额状态（quota_exhausted_at_ms / quota_reset_at_ms / 已用流量）
+  // - admin 视图与 read-only 视图保持一致
+  const [forwardSnapshot, setForwardSnapshot] = useState<Forward | null>(null);
+  const isAdmin = user?.role === "admin";
 
   // 测试相关
   const [testing, setTesting] = useState(false);
@@ -404,6 +409,12 @@ export default function TopologyEditor() {
         if (f) {
           form.setFieldsValue({
             name: f.name, listen_port: f.listen_port,
+            // #39 quota/rate 表单回填（admin only 显示；customer 看 read-only Card）
+            quota_in_gb: f.quota_in_bytes ? f.quota_in_bytes / (1024 ** 3) : undefined,
+            quota_out_gb: f.quota_out_bytes ? f.quota_out_bytes / (1024 ** 3) : undefined,
+            rate_in_mbps: f.rate_in_bps ? f.rate_in_bps / (1024 ** 2) : undefined,
+            rate_out_mbps: f.rate_out_bps ? f.rate_out_bps / (1024 ** 2) : undefined,
+            quota_reset: f.quota_reset ?? "none",
           });
           const parts = (f.protocol || "tcp")
             .split("+").map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -411,11 +422,12 @@ export default function TopologyEditor() {
           setHops(f.hops);
           setTargets(f.targets ?? []);
           setTargetStrategy(f.target_strategy || "weighted");
+          setForwardSnapshot(f);
         }
         setPageReady(true);
       }).catch(() => setPageReady(true));
     } else {
-      form.setFieldsValue({ listen_port: 10080 });
+      form.setFieldsValue({ listen_port: 10080, quota_reset: "none" });
     }
   }, [id, form]);
 
@@ -620,11 +632,27 @@ export default function TopologyEditor() {
         return;
       }
       setBusy(true);
+      // #39 quota/rate 表单显示用 GB / MB/s，发送用 bytes / bytes-per-second。
+      // 非 admin 不发这些字段（后端会自动忽略，但 client side 也明确不传减少误会）。
+      const quotaFields = isAdmin ? {
+        quota_in_bytes: values.quota_in_gb ? Math.round(values.quota_in_gb * 1024 ** 3) : null,
+        quota_out_bytes: values.quota_out_gb ? Math.round(values.quota_out_gb * 1024 ** 3) : null,
+        rate_in_bps: values.rate_in_mbps ? Math.round(values.rate_in_mbps * 1024 ** 2) : null,
+        rate_out_bps: values.rate_out_mbps ? Math.round(values.rate_out_mbps * 1024 ** 2) : null,
+        quota_reset: values.quota_reset && values.quota_reset !== "none" ? values.quota_reset : null,
+      } : {};
+      const {
+        quota_in_gb: _qig, quota_out_gb: _qog,
+        rate_in_mbps: _rim, rate_out_mbps: _rom,
+        quota_reset: _qr,
+        ...basicValues
+      } = values;
       const payload = {
-        ...values, hops,
+        ...basicValues, hops,
         protocol: protocols.join("+"),
         targets: cleanTargets,
         target_strategy: targetStrategy,
+        ...quotaFields,
       };
       if (id) await api.put(`/api/forwards/${id}`, payload);
       else await api.post("/api/forwards", payload);
@@ -748,6 +776,12 @@ export default function TopologyEditor() {
             </ReactFlow>
           </div>
         </Card>
+
+        <QuotaSection
+          isAdmin={isAdmin}
+          readOnly={readOnly}
+          snapshot={forwardSnapshot}
+        />
       </Form>
 
       {/* 配置抽屉 */}
@@ -1095,4 +1129,178 @@ function HopConfigPanel(props: {
       </div>
     </Space>
   );
+}
+
+// ── #39 流量限制配置区 ─────────────────────────────────
+// admin: 表单输入；customer: 仅显示当前状态（已用 / 上限 / 重置倒计时 / 触达状态）。
+// 单位约定：UI 用 GB / MB·s⁻¹，发送时由 save() 换成 bytes / bytes·s⁻¹。
+function QuotaSection({
+  isAdmin, readOnly, snapshot,
+}: {
+  isAdmin: boolean;
+  readOnly: boolean;
+  snapshot: Forward | null;
+}) {
+  const exhausted = snapshot?.quota_exhausted_at_ms != null;
+  return (
+    <Card
+      title="流量限制（可选）"
+      size="small"
+      style={{ marginBottom: 32 }}
+    >
+      {!isAdmin && (
+        <Alert
+          type="info"
+          showIcon
+          message="仅管理员可配置流量上限"
+          description={snapshot
+            ? "下方显示该转发当前的限额状态。如需调整请联系管理员。"
+            : "新转发由管理员初始化后才会有限额。"}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {exhausted && (
+        <Alert
+          type="warning"
+          showIcon
+          message="已触达流量上限，转发被软停"
+          description={snapshot?.quota_reset_at_ms
+            ? `下次重置：${new Date(snapshot.quota_reset_at_ms).toLocaleString()}（UTC）`
+            : "重置策略为「永不」—— 需要管理员手动重置或上调配额。"}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {snapshot && (
+        <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <QuotaUsageBar
+            label="上传（客户端→target）"
+            used={snapshot.bytes_in ?? 0}
+            limit={snapshot.quota_in_bytes ?? null}
+          />
+          <QuotaUsageBar
+            label="下载（target→客户端）"
+            used={snapshot.bytes_out ?? 0}
+            limit={snapshot.quota_out_bytes ?? null}
+          />
+        </div>
+      )}
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 16, alignItems: "end",
+      }}>
+        <Form.Item
+          name="quota_in_gb"
+          label="上传 quota (GB)"
+          tooltip="累计上传到达上限后软停转发；空 = 不限"
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber
+            min={0} step={1} precision={2}
+            placeholder="不限"
+            style={{ width: "100%" }} className="num"
+            disabled={readOnly || !isAdmin}
+          />
+        </Form.Item>
+        <Form.Item
+          name="quota_out_gb"
+          label="下载 quota (GB)"
+          tooltip="累计下载到达上限后软停转发；空 = 不限"
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber
+            min={0} step={1} precision={2}
+            placeholder="不限"
+            style={{ width: "100%" }} className="num"
+            disabled={readOnly || !isAdmin}
+          />
+        </Form.Item>
+        <Form.Item
+          name="quota_reset"
+          label="重置周期"
+          tooltip="到点自动清零累计 + 恢复软停；none = 仅手动重置"
+          style={{ marginBottom: 0 }}
+        >
+          <Select
+            options={[
+              { value: "none", label: "永不重置（手动）" },
+              { value: "daily", label: "每日 UTC 00:00" },
+              { value: "monthly", label: "每月 1 号 UTC 00:00" },
+            ]}
+            disabled={readOnly || !isAdmin}
+          />
+        </Form.Item>
+        <Form.Item
+          name="rate_in_mbps"
+          label="上传带宽 (MB/s)"
+          tooltip="瞬时带宽上限，token bucket；空 = 不限"
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber
+            min={0} step={1} precision={2}
+            placeholder="不限"
+            style={{ width: "100%" }} className="num"
+            disabled={readOnly || !isAdmin}
+          />
+        </Form.Item>
+        <Form.Item
+          name="rate_out_mbps"
+          label="下载带宽 (MB/s)"
+          tooltip="瞬时带宽上限，token bucket；空 = 不限"
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber
+            min={0} step={1} precision={2}
+            placeholder="不限"
+            style={{ width: "100%" }} className="num"
+            disabled={readOnly || !isAdmin}
+          />
+        </Form.Item>
+        {snapshot?.quota_reset_at_ms && !exhausted && (
+          <div style={{ alignSelf: "end", paddingBottom: 4 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              下次重置：{new Date(snapshot.quota_reset_at_ms).toLocaleString()}
+            </Text>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function QuotaUsageBar({ label, used, limit }: { label: string; used: number; limit: number | null }) {
+  if (!limit || limit <= 0) {
+    return (
+      <div>
+        <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
+        <div style={{ marginTop: 4 }}>
+          <Text className="num" style={{ fontSize: 14 }}>{formatBytesGb(used)}</Text>
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>· 无上限</Text>
+        </div>
+      </div>
+    );
+  }
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const status: "normal" | "exception" | "active" =
+    pct >= 100 ? "exception" : pct >= 80 ? "active" : "normal";
+  return (
+    <div>
+      <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
+      <Progress
+        percent={pct}
+        status={status}
+        format={() => `${formatBytesGb(used)} / ${formatBytesGb(limit)}`}
+        size="small"
+      />
+    </div>
+  );
+}
+
+function formatBytesGb(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 ** 2) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+  return `${(b / 1024 ** 3).toFixed(2)} GB`;
 }
