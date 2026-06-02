@@ -20,6 +20,8 @@
 #   --release-tag <tag>    指定 GitHub Release（默认 latest）
 #   --install-dir <dir>    安装目录（默认 /opt/iris）
 #   --data-addr <addr>     数据面监听地址（默认从 enroll API 推断）
+#   --master-host <name>   /etc/hosts 别名（默认 iris-master）。换 master IP 只需改 /etc/hosts 一行。
+#   --no-host-alias        关闭 hosts 别名机制，.env 直接写 --master 的 host
 #
 set -euo pipefail
 
@@ -33,6 +35,8 @@ TOKEN=""
 BINARY=""
 BINARY_URL=""
 ACTION="install"
+MASTER_HOST_ALIAS="iris-master"   # /etc/hosts 别名；--master 是 IP 时自动启用
+USE_HOST_ALIAS="auto"              # auto | always | never
 
 # ---- parse args ----
 while [ $# -gt 0 ]; do
@@ -44,6 +48,8 @@ while [ $# -gt 0 ]; do
     --release-tag)  RELEASE_TAG="$2"; shift 2 ;;
     --install-dir)  INSTALL_DIR="$2"; shift 2 ;;
     --data-addr)    DATA_ADDR="$2"; shift 2 ;;
+    --master-host)  MASTER_HOST_ALIAS="$2"; USE_HOST_ALIAS="always"; shift 2 ;;
+    --no-host-alias) USE_HOST_ALIAS="never"; shift ;;
     --upgrade)        ACTION="upgrade"; shift ;;
     --upgrade-master) ACTION="upgrade-master"; shift ;;
     --uninstall)      ACTION="uninstall"; shift ;;
@@ -84,6 +90,47 @@ parse_json() {
   else
     python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"
   fi
+}
+
+# ---- host alias for master URL ----
+# 检测字符串是否为 IPv4 / IPv6 字面量（粗粒度，够区分常见 case）。
+is_ip_literal() {
+  case "$1" in
+    *[a-zA-Z]*) return 1 ;;                              # 含字母 → 域名
+    [0-9]*.[0-9]*.[0-9]*.[0-9]*) return 0 ;;            # IPv4
+    \[*\]) return 0 ;;                                   # 带方括号的 IPv6
+    *:*) return 0 ;;                                     # 含冒号且无字母 → IPv6
+    *) return 1 ;;
+  esac
+}
+
+# 从 --master 提取 host（去 scheme、去端口）。失败返回空。
+extract_master_host() {
+  local url="$1"
+  echo "$url" | sed -E 's|^https?://||; s|/.*$||; s|:[0-9]+$||'
+}
+
+# 写入 /etc/hosts pin 行（idempotent，删旧行再写新行）。
+pin_master_host() {
+  local ip="$1"
+  local alias="$2"
+  local marker="# iris-master alias (managed by install.sh) — change IP here to migrate master"
+  if [ ! -w /etc/hosts ]; then die "/etc/hosts 不可写"; fi
+  # 删除旧 pin 行（以 marker 标记或别名标记）
+  sed -i.bak -E "/${marker//\//\\/}/d" /etc/hosts 2>/dev/null || true
+  sed -i.bak -E "/[[:space:]]${alias}\$/d; /[[:space:]]${alias}[[:space:]]/d" /etc/hosts 2>/dev/null || true
+  rm -f /etc/hosts.bak
+  printf "%s\n%s %s\n" "$marker" "$ip" "$alias" >> /etc/hosts
+}
+
+# 撤销 /etc/hosts pin 行（uninstall 用）。
+unpin_master_host() {
+  local alias="${1:-iris-master}"
+  local marker="# iris-master alias (managed by install.sh) — change IP here to migrate master"
+  [ -w /etc/hosts ] || return 0
+  sed -i.bak -E "/${marker//\//\\/}/d" /etc/hosts 2>/dev/null || true
+  sed -i.bak -E "/[[:space:]]${alias}\$/d; /[[:space:]]${alias}[[:space:]]/d" /etc/hosts 2>/dev/null || true
+  rm -f /etc/hosts.bak
 }
 
 # ---- binary source resolution ----
@@ -174,9 +221,33 @@ do_install() {
   # 推导 master gRPC URL。enroll API 返回的 master_grpc 字段依赖 master 端
   # IRIS_PUBLIC_GRPC env，未设时默认 127.0.0.1:7443，不可用。这里强制从 --master 参数
   # 推导：取 host，加端口 7443（master gRPC 监听固定 7443）。
-  local master_host master_grpc
-  master_host=$(echo "$MASTER" | sed -E 's|^https?://||; s|:[0-9]+$||; s|/.*$||')
-  master_grpc="https://${master_host}:7443"
+  local master_host master_grpc env_host
+  master_host=$(extract_master_host "$MASTER")
+
+  # Host 别名机制（默认 auto）：--master 是 IP 字面量 → 写 /etc/hosts 别名 + .env 用 hostname。
+  # 未来 master 换 IP 只改 /etc/hosts 一行，无需 systemctl restart（gRPC client 自动重连）。
+  # 域名直连不走 hosts 别名（DNS 已经是间接层）。
+  env_host="$master_host"
+  case "$USE_HOST_ALIAS" in
+    always)
+      pin_master_host "$master_host" "$MASTER_HOST_ALIAS"
+      env_host="$MASTER_HOST_ALIAS"
+      info "/etc/hosts pinned: $master_host → $MASTER_HOST_ALIAS（换 master IP 只改这一行）"
+      ;;
+    never)
+      info "禁用 hosts 别名（.env 直接用 --master 的 host = $master_host）"
+      ;;
+    auto)
+      if is_ip_literal "$master_host"; then
+        pin_master_host "$master_host" "$MASTER_HOST_ALIAS"
+        env_host="$MASTER_HOST_ALIAS"
+        info "/etc/hosts pinned: $master_host → $MASTER_HOST_ALIAS（换 master IP 只改这一行）"
+      else
+        info "--master 是域名（$master_host），跳过 hosts 别名（DNS 已是间接层）"
+      fi
+      ;;
+  esac
+  master_grpc="https://${env_host}:7443"
 
   echo "    节点 ID: $node_id"
   echo "    控制面: $master_grpc"
@@ -310,6 +381,9 @@ do_uninstall() {
 
   info "删除 $INSTALL_DIR"
   rm -rf "$INSTALL_DIR"
+
+  info "撤销 /etc/hosts iris-master 别名（若有）"
+  unpin_master_host "$MASTER_HOST_ALIAS"
 
   ok "卸载完成。备份保留在 $backup（如确认无需，可手动 rm）"
 }
