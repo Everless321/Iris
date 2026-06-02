@@ -84,6 +84,14 @@ impl NftFastPath {
 impl FastPathManager for NftFastPath {
     fn init(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
+        // DNAT 把包送到外部目标必须 ip_forward=1，否则 kernel 不会路由出去。
+        // Ubuntu/Debian 默认是 0（仅做客户端使用）— 静默启用，失败仅 warn 不阻塞。
+        // 不写 /etc/sysctl.d 是有意：fast path 是 iris 运行时行为，agent 死了应该自动失效。
+        for sysctl_path in ["/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv4/conf/all/forwarding"] {
+            if let Err(e) = std::fs::write(sysctl_path, "1\n") {
+                tracing::warn!(path = %sysctl_path, error = %e, "enable ip_forward failed (DNAT may not route)");
+            }
+        }
         // 先清旧残留（上一次 agent crash 留的），失败忽略
         let _ = Self::nft_exec(&format!("delete table inet {TABLE}"));
         // 新建表 + 两条 nat chain；postrouting 默认 masquerade
