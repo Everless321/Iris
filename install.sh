@@ -213,11 +213,19 @@ do_install() {
   [ -z "$MASTER" ] && die "缺少 --master <http(s) url>"
   [ -z "$TOKEN" ]  && die "缺少 --token <enrollment token>"
 
+  # binary 已存在但 certs 为空 / .env 缺失 → 视为"镜像首次启动 + enroll"场景：
+  # 跳过下载，直接走 enroll + 写 cert + 写 .env + 起服务。
+  # 真正"重复安装"（已有 cert+.env+running service）才报错让用户走 --upgrade。
+  local from_image=0
   if [ -x "$INSTALL_DIR/iris-node" ]; then
-    warn "$INSTALL_DIR/iris-node 已存在。"
-    warn "升级请用：curl ... | sudo bash -s -- --upgrade"
-    warn "重装请先：curl ... | sudo bash -s -- --uninstall"
-    exit 1
+    if [ -f "$INSTALL_DIR/.env" ] && [ -s "$INSTALL_DIR/certs/client.pem" ] 2>/dev/null; then
+      warn "$INSTALL_DIR/iris-node 已存在且已 enroll 过。"
+      warn "升级请用：curl ... | sudo bash -s -- --upgrade"
+      warn "重装请先：curl ... | sudo bash -s -- --uninstall"
+      exit 1
+    fi
+    info "检测到镜像 baked binary（无 cert/.env） — 跳过 binary 下载，直接 enroll"
+    from_image=1
   fi
 
   mkdir -p "$INSTALL_DIR/certs" "$INSTALL_DIR/data"
@@ -280,7 +288,9 @@ do_install() {
   chmod 600 "$INSTALL_DIR/certs/ca.pem" "$INSTALL_DIR/certs/client.pem" "$INSTALL_DIR/certs/client-key.pem"
   chmod 700 "$INSTALL_DIR/certs"
 
-  download_binary "$INSTALL_DIR/iris-node"
+  if [ "$from_image" -eq 0 ]; then
+    download_binary "$INSTALL_DIR/iris-node"
+  fi
 
   info "写入 $INSTALL_DIR/.env"
   cat > "$INSTALL_DIR/.env" <<EOF
