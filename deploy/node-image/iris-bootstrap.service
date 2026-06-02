@@ -1,0 +1,18 @@
+[Unit]
+Description=Iris node first-boot auto-enroll
+Documentation=https://github.com/Everless321/Iris
+After=network-online.target cloud-init.service
+Wants=network-online.target
+# 注意：不要 Before=iris-node.service — install.sh 内部 `systemctl enable --now iris-node`
+# 会等 iris-node 启动，反过来 iris-node 被 ordered after us → 死锁。
+# 让 install.sh 自己启 iris-node 即可（不依赖 systemd ordering）。
+ConditionPathExists=!/opt/iris/.enrolled
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/iris-bootstrap.sh
+RemainAfterExit=yes
+TimeoutSec=120
+
+[Install]
+WantedBy=multi-user.target
