@@ -66,6 +66,8 @@ export type Node = {
   last_seen: number | null;
   created_at: number;
   cert_not_after_ms?: number;
+  // M4.2-A fast path 能力 JSON 字符串（节点 heartbeat 上报）。空 = 老节点不支持
+  capabilities?: string;
 };
 export type HopNode = { id: string; weight: number };
 export type Hop = { strategy: string; nodes: HopNode[] };

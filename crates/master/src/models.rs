@@ -32,6 +32,11 @@ pub struct Node {
     #[sqlx(default)]
     #[serde(default)]
     pub cert_not_after_ms: i64,
+    /// migration 0013 M4.2-A：fast path 能力 JSON。空 / NULL = 老节点未上报。
+    /// 例：{"fastpath":true,"kernel":"6.1.0","reason":"ok","in_container":false}
+    #[sqlx(default)]
+    #[serde(default)]
+    pub capabilities: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -425,6 +425,13 @@ impl Control for ControlSvc {
         };
         // 节点 IP 漂移自动跟踪：advertised_addr 的 host 是 wildcard / loopback 时用 peer 源 IP 替换；
         // 只有最终值与 sqlite 现存 addr 不同才 UPDATE，避免每 2s 写一次。空字符串 = 老节点跳过。
+        // M4.2-A 持久化节点 fastpath 能力。空字符串 = 老节点不上报，保持旧值。
+        if !r.capabilities.is_empty() {
+            if let Err(e) = sqlx::query("UPDATE nodes SET capabilities=? WHERE id=?")
+                .bind(&r.capabilities).bind(&r.node_id).execute(&self.pool).await {
+                tracing::warn!(node = %r.node_id, error = %e, "更新节点 capabilities 失败");
+            }
+        }
         if let Some(new_addr) = resolve_advertised_addr(&r.advertised_addr, peer_ip) {
             let cur: Option<(String,)> = sqlx::query_as("SELECT addr FROM nodes WHERE id=?")
                 .bind(&r.node_id).fetch_optional(&self.pool).await.ok().flatten();

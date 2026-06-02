@@ -33,6 +33,9 @@ message HeartbeatRequest {
   // 节点通常发 IRIS_DATA_ADDR 原文（如 "0.0.0.0:7444"）；master 检测到 host 是
   // wildcard / loopback 时用 peer 源 IP 替换。空 = 老节点，master 不更新 addr。
   string advertised_addr = 8;
+  // M4 fast path 能力 JSON。例：{"fastpath":true,"kernel":"6.1.0","reason":"ok","in_container":false}
+  // 空字符串 / 不存在 = 老节点不支持上报，master 视为 fastpath=false。
+  string capabilities = 9;
 }
 
 // 单条 TCP 会话（每个 forward 入口 accept 的 connection）。

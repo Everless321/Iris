@@ -1,4 +1,5 @@
 mod dataplane;
+mod fastpath;
 mod forward;
 mod lb;
 mod quic_tunnel;
@@ -586,6 +587,11 @@ async fn main() -> Result<()> {
     let session_table = session::SessionTable::new();
     let entry_node_id_arc = Arc::new(node_id.clone());
 
+    // M4 fast path 能力探测（同步，~10ms）。失败不阻塞 agent 启动；结果 JSON 上报 master。
+    let fastpath_cap = fastpath::probe::detect();
+    tracing::info!(fastpath = fastpath_cap.fastpath, reason = %fastpath_cap.reason, kernel = %fastpath_cap.kernel, "fastpath probe");
+    let fastpath_cap_json = fastpath_cap.to_json();
+
     // 启动入口监听器 + 后续 sync_config 时 reconcile（热加载，无需 restart node）
     let mut active_forwards: HashMap<i64, ActiveForward> = HashMap::new();
     reconcile_forwards(
@@ -619,6 +625,7 @@ async fn main() -> Result<()> {
                 cert_not_after_ms: cert_not_after.load(Ordering::Relaxed),
                 session_events: session_table.snapshot_and_gc(),
                 advertised_addr: data_addr.clone(),
+                capabilities: fastpath_cap_json.clone(),
             })
             .await
         {
