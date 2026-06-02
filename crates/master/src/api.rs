@@ -402,9 +402,18 @@ async fn create_forward(
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
     let targets_json = serde_json::to_string(&targets).map_err(err)?;
     let now = now_ms();
-    // #39 quota 字段 + 下次重置时戳（reset='none' / NULL 则 quota_reset_at_ms 也 NULL）
-    let q_reset = normalize_quota_reset(f.quota_reset.as_deref());
-    let q_reset_at = crate::compute_next_reset_at_ms(q_reset.as_deref(), now);
+    // #39 quota / rate / 重置策略：仅 admin 可设置。customer 创建时强制 None（之后 admin 来加）。
+    let (eff_qin, eff_qout, eff_rin, eff_rout, eff_qreset, eff_qreset_at) = if claims.is_admin() {
+        let qr = normalize_quota_reset(f.quota_reset.as_deref());
+        let qra = crate::compute_next_reset_at_ms(qr.as_deref(), now);
+        (
+            nz_opt(f.quota_in_bytes), nz_opt(f.quota_out_bytes),
+            nz_opt(f.rate_in_bps), nz_opt(f.rate_out_bps),
+            qr, qra,
+        )
+    } else {
+        (None, None, None, None, None, None)
+    };
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO forwards \
          (name,listen_port,protocol,path,target,target_strategy,enabled,created_at,owner_id, \
@@ -413,9 +422,9 @@ async fn create_forward(
     )
     .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
     .bind(&targets_json).bind(&f.target_strategy).bind(now).bind(claims.sub)
-    .bind(nz_opt(f.quota_in_bytes)).bind(nz_opt(f.quota_out_bytes))
-    .bind(nz_opt(f.rate_in_bps)).bind(nz_opt(f.rate_out_bps))
-    .bind(&q_reset).bind(q_reset_at)
+    .bind(eff_qin).bind(eff_qout)
+    .bind(eff_rin).bind(eff_rout)
+    .bind(&eff_qreset).bind(eff_qreset_at)
     .fetch_one(&s.pool).await
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
@@ -430,12 +439,12 @@ async fn create_forward(
         enabled: true, created_at: now, owner_id: claims.sub,
         listener_status: Vec::new(),
         bytes_in: 0, bytes_out: 0,
-        quota_in_bytes: nz_opt(f.quota_in_bytes),
-        quota_out_bytes: nz_opt(f.quota_out_bytes),
-        rate_in_bps: nz_opt(f.rate_in_bps),
-        rate_out_bps: nz_opt(f.rate_out_bps),
-        quota_reset: q_reset,
-        quota_reset_at_ms: q_reset_at,
+        quota_in_bytes: eff_qin,
+        quota_out_bytes: eff_qout,
+        rate_in_bps: eff_rin,
+        rate_out_bps: eff_rout,
+        quota_reset: eff_qreset,
+        quota_reset_at_ms: eff_qreset_at,
         quota_exhausted_at_ms: None,
     }))
 }
@@ -507,9 +516,25 @@ async fn update_forward(
     check_entry_port_conflict(&s.pool, f.listen_port, &protocol, &entry_ids, Some(id)).await?;
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
     let targets_json = serde_json::to_string(&targets).map_err(err)?;
-    // #39 编辑时也可调整 quota / rate / 重置策略。reset 策略变更时同步刷新 quota_reset_at_ms。
-    let q_reset = normalize_quota_reset(f.quota_reset.as_deref());
-    let q_reset_at = crate::compute_next_reset_at_ms(q_reset.as_deref(), now_ms());
+    // #39 quota / rate / 重置策略：admin 可调，customer 不可（否则可绕过自己被管理员设置的限额）。
+    // customer 改其它字段时，quota_* 全部用 DB 旧值覆盖入参。
+    let (eff_qin, eff_qout, eff_rin, eff_rout, eff_qreset, eff_qreset_at) = if claims.is_admin() {
+        let qr = normalize_quota_reset(f.quota_reset.as_deref());
+        let qra = crate::compute_next_reset_at_ms(qr.as_deref(), now_ms());
+        (
+            nz_opt(f.quota_in_bytes), nz_opt(f.quota_out_bytes),
+            nz_opt(f.rate_in_bps), nz_opt(f.rate_out_bps),
+            qr, qra,
+        )
+    } else {
+        let row: (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT quota_in_bytes, quota_out_bytes, rate_in_bps, rate_out_bps, \
+                 quota_reset, quota_reset_at_ms FROM forwards WHERE id=?",
+            )
+            .bind(id).fetch_one(&s.pool).await.map_err(err)?;
+        row
+    };
     sqlx::query(
         "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=?, target_strategy=?, \
          quota_in_bytes=?, quota_out_bytes=?, rate_in_bps=?, rate_out_bps=?, \
@@ -518,9 +543,9 @@ async fn update_forward(
     )
     .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
     .bind(&targets_json).bind(&f.target_strategy)
-    .bind(nz_opt(f.quota_in_bytes)).bind(nz_opt(f.quota_out_bytes))
-    .bind(nz_opt(f.rate_in_bps)).bind(nz_opt(f.rate_out_bps))
-    .bind(&q_reset).bind(q_reset_at)
+    .bind(eff_qin).bind(eff_qout)
+    .bind(eff_rin).bind(eff_rout)
+    .bind(&eff_qreset).bind(eff_qreset_at)
     .bind(id)
     .execute(&s.pool).await
     .map_err(|e| {

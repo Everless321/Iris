@@ -362,23 +362,21 @@ struct ControlSvc {
 /// 节点 cert CN 格式 `iris-node-<id>`（参见 common::sign_node_cert）；
 /// rebrand #25 之前签发的 legacy cert CN 是 `zhuanfa-node-<id>`，
 /// 节点上报的 advertised_addr 合成最终 host:port。
+///
+/// **安全模型**：host 始终用 peer_ip（mTLS 握手后的 TCP 源 IP），只取 advertised 的 port。
+/// 节点可以告诉 master "我监听 7444"，但**不能**说"我的 IP 是 1.2.3.4" — 防节点伪造 IP
+/// 让 master 反向 ProbeReach 攻击别人 / 让其他节点的 datapath 路由错位。
+///
 /// - 空字符串 → None（老节点，不动 nodes.addr）
-/// - host 是 wildcard (0.0.0.0/::/[::]) 或 loopback → 用 peer_ip 替换 host，端口保留
-/// - 其他 → 原样
-/// 端口缺失或解析失败一律 None（避免写脏数据）。
+/// - peer_ip 缺失 → None（没源 IP 没法兜底）
+/// - 端口解析失败 → None
+/// - 否则 → `peer_ip:advertised_port`，IPv6 自动加方括号
 fn resolve_advertised_addr(advertised: &str, peer_ip: Option<std::net::IpAddr>) -> Option<String> {
     if advertised.is_empty() { return None; }
-    let (host, port) = advertised.rsplit_once(':')?;
-    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let (_host, port) = advertised.rsplit_once(':')?;
     if port.parse::<u16>().is_err() { return None; }
-    let needs_substitute = matches!(host, "0.0.0.0" | "::" | "127.0.0.1" | "localhost")
-        || host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback() || ip.is_unspecified()).unwrap_or(false);
-    if needs_substitute {
-        let ip = peer_ip?;
-        Some(if ip.is_ipv6() { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") })
-    } else {
-        Some(format!("{host}:{port}"))
-    }
+    let ip = peer_ip?;
+    Some(if ip.is_ipv6() { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") })
 }
 
 /// 容忍其作为过渡 — 让 legacy 节点也能调 RenewCert 自助升级到新 CN。
@@ -885,8 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_ip_passthrough() {
-        assert_eq!(resolve_advertised_addr("5.6.7.8:7444", ip("1.2.3.4")), Some("5.6.7.8:7444".into()));
+    fn explicit_ip_is_overridden_by_peer() {
+        // 安全约束：节点 advertised 的非 wildcard host 也被 peer_ip 覆盖。
+        // 防节点谎报 IP 让 master 反向 ProbeReach / datapath 路由错位。
+        assert_eq!(resolve_advertised_addr("5.6.7.8:7444", ip("1.2.3.4")), Some("1.2.3.4:7444".into()));
     }
 
     #[test]
