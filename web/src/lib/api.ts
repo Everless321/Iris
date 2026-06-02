@@ -101,6 +101,8 @@ export type Forward = {
   quota_exhausted_at_ms?: number | null;
   // #27 节点间链路加密：'tls'（默认）/ 'plain'
   link_encryption?: "tls" | "plain";
+  // M4.2 转发路径模式：'auto'（默认；plain 时走 fast）/ 'fast' / 'slow'
+  path_mode?: "auto" | "fast" | "slow";
 };
 export type Enrollment = {
   token: string;

@@ -38,6 +38,7 @@ impl FastPathCapability {
 
 /// 单条 fast path 规则定义（master sync_config → node spawn_forward）。
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 字段在 cfg(target_os = "linux") nft_linux 里读
 pub struct FastPathRule {
     pub forward_id: i64,
     pub protocol: String, // "tcp" | "udp"

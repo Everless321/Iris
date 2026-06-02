@@ -416,6 +416,7 @@ export default function TopologyEditor() {
             rate_out_mbps: f.rate_out_bps ? f.rate_out_bps / (1024 ** 2) : undefined,
             quota_reset: f.quota_reset ?? "none",
             link_encryption: f.link_encryption ?? "tls",
+            path_mode: f.path_mode ?? "auto",
           });
           const parts = (f.protocol || "tcp")
             .split("+").map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -643,12 +644,15 @@ export default function TopologyEditor() {
         quota_reset: values.quota_reset && values.quota_reset !== "none" ? values.quota_reset : null,
         // #27 链路加密：admin 才发；customer 不传由 master 端兜底 admin-gate
         link_encryption: values.link_encryption === "plain" ? "plain" : "tls",
+        // M4.2 fast path 模式：admin 才发
+        path_mode: ["fast", "slow"].includes(values.path_mode) ? values.path_mode : "auto",
       } : {};
       const {
         quota_in_gb: _qig, quota_out_gb: _qog,
         rate_in_mbps: _rim, rate_out_mbps: _rom,
         quota_reset: _qr,
         link_encryption: _le,
+        path_mode: _pm,
         ...basicValues
       } = values;
       const payload = {
@@ -1329,6 +1333,31 @@ function LinkEncryptionSection({
           style={{ marginTop: 8 }}
         />
       )}
+
+      {/* M4.2 fast path 路径模式 */}
+      <Form.Item
+        name="path_mode"
+        label="转发路径"
+        tooltip="auto：单跳 + 明文 + 节点支持 nftables → 走内核 fast path；其它情况 slow path。fast：强制尝试内核（失败回退 slow）。slow：强制用户态 tokio 转发。"
+        style={{ marginBottom: 0, marginTop: 16 }}
+      >
+        <Select
+          options={[
+            { value: "auto", label: "自动 — 满足条件走内核 fast path" },
+            { value: "fast", label: "强制 fast — 内核 nftables DNAT（失败自动回退 slow）" },
+            { value: "slow", label: "强制 slow — 用户态 tokio 转发（保留 session 历史/双向流量统计）" },
+          ]}
+          disabled={readOnly || !isAdmin}
+          style={{ maxWidth: 480 }}
+        />
+      </Form.Item>
+      <Alert
+        type="info"
+        showIcon
+        message="fast path 限制"
+        description="只对单跳 + 单 target + 非 TLS 加密的 TCP/UDP 生效；多跳 / 多 target / TLS 永远 slow。fast 模式下 #36 会话历史不可用、流量统计仅入向（出向 V2）。"
+        style={{ marginTop: 8 }}
+      />
     </Card>
   );
 }

@@ -59,6 +59,16 @@ export default function Forwards() {
                 <Tag color="warning" style={{ marginLeft: 4, cursor: "help" }}>明文</Tag>
               </Tooltip>
             )}
+            {f.path_mode === "fast" && (
+              <Tooltip title="强制内核 fast path（nftables DNAT）。失败自动回退 slow path。">
+                <Tag color="processing" style={{ marginLeft: 4, cursor: "help" }}>fast</Tag>
+              </Tooltip>
+            )}
+            {f.path_mode === "slow" && (
+              <Tooltip title="强制 slow path（用户态 tokio 转发）— 保留 session 历史 + 双向流量统计">
+                <Tag style={{ marginLeft: 4, cursor: "help" }}>slow</Tag>
+              </Tooltip>
+            )}
           </>
         );
       },
