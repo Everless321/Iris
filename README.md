@@ -30,26 +30,24 @@
 
 ### 部署 master（一台）
 
+**一键安装**（自动生成 admin 密码 + JWT 密钥 + systemd unit + 健康检查 + 打印登录凭据）：
+
 ```bash
-# 1. 拉二进制（musl static-pie，所有 Linux 通杀）
-curl -fsSLO https://github.com/Everless321/Iris/releases/latest/download/iris-master-musl-x86_64
-chmod +x iris-master-musl-x86_64
-sudo mv iris-master-musl-x86_64 /opt/iris/iris-master
-
-# 2. 配置 master.env（admin 密码、JWT 密钥）
-sudo mkdir -p /opt/iris
-sudo tee /opt/iris/master.env <<EOF
-IRIS_JWT_SECRET=$(openssl rand -hex 32)
-IRIS_ADMIN_USER=admin
-IRIS_ADMIN_PASS=$(openssl rand -base64 24)
-EOF
-sudo chmod 600 /opt/iris/master.env
-
-# 3. 启 systemd service（unit 见 deploy/master/iris-master.service 或自行编写）
-sudo systemctl enable --now iris-master
-
-# 4. 浏览器打开 http://<MASTER>:7080，admin 登录
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --install-master
 ```
+
+可选参数（不传则随机生成并明文打印一次）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --install-master \
+  --admin-user admin \
+  --admin-pass <your-pass> \
+  --jwt-secret $(openssl rand -hex 32)
+```
+
+脚本完成后浏览器打开 `http://<MASTER>:7080` 用打印出来的 admin 凭据登录即可。
+
+> 想手工部署 / 不用脚本？查 [deploy/master/README.md](deploy/master/README.md)。
 
 ### 加节点（一行命令）
 

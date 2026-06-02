@@ -14,6 +14,12 @@
 # 升级 master（替换 iris-master + 重启 iris-master.service）：
 #   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --upgrade-master
 #
+# 首次安装 master（生成 master.env + 起 service）：
+#   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --install-master \
+#     [--admin-user admin]   # 默认 admin
+#     [--admin-pass <pass>]  # 不传则 openssl rand 生成并打印
+#     [--jwt-secret <hex>]   # 不传则 openssl rand 生成
+#
 # 卸载节点（备份 + 移除）：
 #   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --uninstall
 #
@@ -40,6 +46,9 @@ BINARY_URL=""
 ACTION="install"
 MASTER_HOST_ALIAS="iris-master"   # /etc/hosts 别名；--master 是 IP 时自动启用
 USE_HOST_ALIAS="auto"              # auto | always | never
+ADMIN_USER=""                     # --install-master 时用，未指定默认 admin
+ADMIN_PASS=""                     # --install-master 时用，未指定时随机生成并打印
+JWT_SECRET=""                     # --install-master 时用，未指定时随机生成
 
 # ---- parse args ----
 while [ $# -gt 0 ]; do
@@ -55,6 +64,10 @@ while [ $# -gt 0 ]; do
     --no-host-alias) USE_HOST_ALIAS="never"; shift ;;
     --upgrade)        ACTION="upgrade"; shift ;;
     --upgrade-master) ACTION="upgrade-master"; shift ;;
+    --install-master) ACTION="install-master"; shift ;;
+    --admin-user)     ADMIN_USER="$2"; shift 2 ;;
+    --admin-pass)     ADMIN_PASS="$2"; shift 2 ;;
+    --jwt-secret)     JWT_SECRET="$2"; shift 2 ;;
     --uninstall)      ACTION="uninstall"; shift ;;
     --help|-h)      sed -n '1,/^set/p' "$0" | head -n -1 | sed 's/^# \?//'; exit 0 ;;
     *)              echo "未知参数: $1" >&2; exit 1 ;;
@@ -323,6 +336,120 @@ do_upgrade() {
   fi
 }
 
+# ---- action: install master (首次部署) ----
+# 装 iris-master 服务：生成 master.env + 装 systemd unit + 起 service + 健康检查。
+# admin 密码 / JWT secret 不传时随机生成并明文打印（用户必须立即抄走）。
+# 已存在 /opt/iris/iris-master 时拒绝，提示用 --upgrade-master。
+do_install_master() {
+  if [ -x "$INSTALL_DIR/iris-master" ]; then
+    warn "$INSTALL_DIR/iris-master 已存在。"
+    warn "升级请用：curl ... | sudo bash -s -- --upgrade-master"
+    warn "重装请先：sudo systemctl stop iris-master.service && rm -rf $INSTALL_DIR"
+    exit 1
+  fi
+
+  # 必备工具
+  command -v openssl >/dev/null || die "需要 openssl 生成密钥"
+
+  # 默认 admin user
+  [ -z "$ADMIN_USER" ] && ADMIN_USER="admin"
+
+  # 随机生成缺失的密钥（base64 去掉 = 号避免 shell 转义麻烦）
+  local generated_pass=0 generated_jwt=0
+  if [ -z "$ADMIN_PASS" ]; then
+    ADMIN_PASS=$(openssl rand -base64 24 | tr -d '=\n')
+    generated_pass=1
+  fi
+  if [ -z "$JWT_SECRET" ]; then
+    JWT_SECRET=$(openssl rand -hex 32)
+    generated_jwt=1
+  fi
+  # JWT_SECRET 长度校验（master 端 warn ≥16 字节，强制 ≥32 字节高熵）
+  if [ ${#JWT_SECRET} -lt 32 ]; then
+    die "--jwt-secret 至少 32 字节（建议 64 hex 字符）"
+  fi
+
+  info "创建 $INSTALL_DIR/{data,certs}"
+  mkdir -p "$INSTALL_DIR/data" "$INSTALL_DIR/certs"
+  chmod 700 "$INSTALL_DIR/certs"
+
+  info "写入 $INSTALL_DIR/master.env (chmod 600)"
+  cat > "$INSTALL_DIR/master.env" <<EOF
+IRIS_ADMIN_USER=$ADMIN_USER
+IRIS_ADMIN_PASS=$ADMIN_PASS
+IRIS_JWT_SECRET=$JWT_SECRET
+EOF
+  chmod 600 "$INSTALL_DIR/master.env"
+
+  download_binary "$INSTALL_DIR/iris-master" "iris-master"
+
+  if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
+    info "安装 systemd 服务 iris-master.service"
+    cat > /etc/systemd/system/iris-master.service <<UNIT
+[Unit]
+Description=Iris Master (control plane + UI)
+Documentation=https://github.com/$RELEASE_REPO
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$INSTALL_DIR/master.env
+ExecStart=$INSTALL_DIR/iris-master
+WorkingDirectory=$INSTALL_DIR
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now iris-master.service
+    sleep 3
+    if systemctl is-active --quiet iris-master.service; then
+      # 健康检查（不强制必须 200，master HTTP listener 还在初始化时可能短暂 connection refused）
+      curl -fsS http://127.0.0.1:7080/healthz >/dev/null 2>&1 || sleep 2
+      curl -fsS http://127.0.0.1:7080/healthz >/dev/null 2>&1 \
+        && ok "master 已上线（/healthz=ok）" \
+        || warn "service 已 active 但 /healthz 暂不通，看 journalctl -u iris-master -f"
+    else
+      die "服务启动失败：journalctl -u iris-master --no-pager -n 30 查错"
+    fi
+  else
+    warn "无 systemd，手动启动：cd $INSTALL_DIR && env \$(cat master.env | xargs) ./iris-master"
+  fi
+
+  # 公网 IP / 主机名给用户拼访问 URL
+  local pub_ip
+  pub_ip=$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+  [ -z "$pub_ip" ] && pub_ip="<this-host>"
+
+  echo
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  ✅ master 部署完成 — 请立即抄走以下凭据并妥善保存"
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  Web UI:    http://${pub_ip}:7080"
+  echo "  Admin:     $ADMIN_USER / $ADMIN_PASS"
+  if [ $generated_pass -eq 1 ]; then
+    echo "             ↑ 随机生成，本次仅显示一次"
+  fi
+  echo
+  echo "  JWT_SECRET 已写入 $INSTALL_DIR/master.env（chmod 600）"
+  if [ $generated_jwt -eq 1 ]; then
+    echo "             ↑ 随机生成，灾难恢复时必须保留这个文件！"
+  fi
+  echo
+  echo "  下一步："
+  echo "    1. 浏览器登录 → 添加节点 → 复制 enrollment token"
+  echo "    2. 节点机器跑："
+  echo "         curl -fsSL https://raw.githubusercontent.com/$RELEASE_REPO/main/install.sh | \\"
+  echo "           sudo bash -s -- --master http://${pub_ip}:7080 --token <TOKEN>"
+  echo "═══════════════════════════════════════════════════════════════"
+}
+
 # ---- action: upgrade master ----
 # 比 node upgrade 严格：master 是控制面单点,失败回滚必须成功。
 # 用 stop → swap → start（而不是 restart）以避免 mv 替换被运行中的 binary 锁住。
@@ -395,6 +522,7 @@ do_uninstall() {
 case "$ACTION" in
   install)        do_install ;;
   upgrade)        do_upgrade ;;
+  install-master) do_install_master ;;
   upgrade-master) do_upgrade_master ;;
   uninstall)      do_uninstall ;;
 esac
