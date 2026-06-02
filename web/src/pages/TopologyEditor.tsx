@@ -415,6 +415,7 @@ export default function TopologyEditor() {
             rate_in_mbps: f.rate_in_bps ? f.rate_in_bps / (1024 ** 2) : undefined,
             rate_out_mbps: f.rate_out_bps ? f.rate_out_bps / (1024 ** 2) : undefined,
             quota_reset: f.quota_reset ?? "none",
+            link_encryption: f.link_encryption ?? "tls",
           });
           const parts = (f.protocol || "tcp")
             .split("+").map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -640,11 +641,14 @@ export default function TopologyEditor() {
         rate_in_bps: values.rate_in_mbps ? Math.round(values.rate_in_mbps * 1024 ** 2) : null,
         rate_out_bps: values.rate_out_mbps ? Math.round(values.rate_out_mbps * 1024 ** 2) : null,
         quota_reset: values.quota_reset && values.quota_reset !== "none" ? values.quota_reset : null,
+        // #27 链路加密：admin 才发；customer 不传由 master 端兜底 admin-gate
+        link_encryption: values.link_encryption === "plain" ? "plain" : "tls",
       } : {};
       const {
         quota_in_gb: _qig, quota_out_gb: _qog,
         rate_in_mbps: _rim, rate_out_mbps: _rom,
         quota_reset: _qr,
+        link_encryption: _le,
         ...basicValues
       } = values;
       const payload = {
@@ -780,6 +784,13 @@ export default function TopologyEditor() {
         <QuotaSection
           isAdmin={isAdmin}
           readOnly={readOnly}
+          snapshot={forwardSnapshot}
+        />
+
+        <LinkEncryptionSection
+          isAdmin={isAdmin}
+          readOnly={readOnly}
+          protocols={protocols}
           snapshot={forwardSnapshot}
         />
       </Form>
@@ -1266,6 +1277,58 @@ function QuotaSection({
           </div>
         )}
       </div>
+    </Card>
+  );
+}
+
+// ── #27 节点间链路加密开关 ─────────────────────────────────
+// 'tls'（默认）= 节点间走 mTLS；'plain' = 节点间 TCP 不裹 TLS（同机房 / 内网信任）。
+// UDP 链路受 QUIC 协议层强制 TLS，选 plain 仅对 TCP 生效，UI 给提示。
+function LinkEncryptionSection({
+  isAdmin, readOnly, protocols, snapshot,
+}: {
+  isAdmin: boolean;
+  readOnly: boolean;
+  protocols: string[];
+  snapshot: Forward | null;
+}) {
+  const hasUdp = protocols.includes("udp");
+  const current = snapshot?.link_encryption ?? "tls";
+  return (
+    <Card title="链路加密（节点之间）" size="small" style={{ marginBottom: 32 }}>
+      {!isAdmin && (
+        <Alert
+          type="info"
+          showIcon
+          message="仅管理员可调整链路加密模式"
+          description={`当前模式：${current === "plain" ? "明文（节点间 TCP 不裹 TLS）" : "TLS（默认）"}`}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      <Form.Item
+        name="link_encryption"
+        label="节点↔节点 传输"
+        tooltip="仅影响多跳之间的 raw_tunnel TCP 链路；客户端↔入口、出口↔target 原协议不变；master↔node 控制面永远 mTLS"
+        style={{ marginBottom: 8 }}
+      >
+        <Select
+          options={[
+            { value: "tls", label: "自动 — TLS 加密（默认，推荐公网）" },
+            { value: "plain", label: "明文 — 同机房 / 信任内网（节点间零 TLS 开销）" },
+          ]}
+          disabled={readOnly || !isAdmin}
+          style={{ maxWidth: 480 }}
+        />
+      </Form.Item>
+      {hasUdp && (
+        <Alert
+          type="warning"
+          showIcon
+          message="UDP 链路仍走 QUIC + TLS"
+          description="QUIC 协议层强制要求 TLS，明文模式仅对 TCP 跳生效。UDP forward 选 plain 不报错但底层照常加密。"
+          style={{ marginTop: 8 }}
+        />
+      )}
     </Card>
   );
 }

@@ -127,7 +127,7 @@ async fn spawn_forward(
                 }
             }));
         } else {
-            let (hops, t, s, ctx2, lb2, tc, ss, ent, rl) = (
+            let (hops, t, s, ctx2, lb2, tc, ss, ent, rl, le) = (
                 f.hops.clone(),
                 targets.clone(),
                 target_strategy.clone(),
@@ -137,10 +137,11 @@ async fn spawn_forward(
                 sessions.clone(),
                 entry_node_id_arc.clone(),
                 rate.clone(),
+                f.link_encryption.clone(),
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent, rl, tx).await
+                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent, rl, le, tx).await
                 {
                     tracing::error!(error = %e, "tcp multi-hop entry exited");
                 }
@@ -489,6 +490,21 @@ async fn main() -> Result<()> {
                 raw_tunnel::serve(raw_addr, acceptor, connector, ctx, lb, target_router).await
             {
                 tracing::error!(error = %e, "raw_tunnel server exited");
+            }
+        });
+    }
+
+    // #27 raw_tunnel plain 服务（端口 = grpc + 3，TCP forward 不裹 TLS）
+    // 节点永远监听该端口；具体某条 forward 是否走它由 master 下发的 link_encryption 控制。
+    let raw_plain_addr = SocketAddr::new(dp_addr.ip(), dp_addr.port() + 3);
+    {
+        let (ctx, lb, target_router) = (ctx.clone(), lb.clone(), target_router.clone());
+        let connector = raw_connector.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                raw_tunnel::serve_plain(raw_plain_addr, connector, ctx, lb, target_router).await
+            {
+                tracing::error!(error = %e, "raw_tunnel plain server exited");
             }
         });
     }

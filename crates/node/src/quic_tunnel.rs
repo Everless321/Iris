@@ -364,6 +364,7 @@ async fn open_next_hop_inner(
             targets: targets.to_vec(),
             target_strategy: target_strategy.to_string(),
             udp_src_addr: udp_src_addr.to_string(),
+            link_encryption: String::new(),
         };
         if let Err(e) = send_header(&conn, &header).await {
             tracing::warn!(node = %node_id, error = %e, "quic next-hop send_header");

@@ -48,10 +48,19 @@ export default function Forwards() {
       title: "协议",
       dataIndex: "protocol",
       key: "protocol",
-      width: 110,
-      render: (p: string) => {
+      width: 130,
+      render: (p: string, f) => {
         const parts = p.split("+").map((x) => x.trim().toUpperCase()).filter(Boolean);
-        return <>{parts.map((x) => <Tag key={x}>{x}</Tag>)}</>;
+        return (
+          <>
+            {parts.map((x) => <Tag key={x}>{x}</Tag>)}
+            {f.link_encryption === "plain" && (
+              <Tooltip title="节点间走明文 TCP（同机房 / 信任内网）— 仅对 TCP 跳生效">
+                <Tag color="warning" style={{ marginLeft: 4, cursor: "help" }}>明文</Tag>
+              </Tooltip>
+            )}
+          </>
+        );
       },
     },
     {

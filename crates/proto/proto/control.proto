@@ -115,6 +115,9 @@ message ForwardRule {
   // #39 速率限制（bytes/sec）。0 = 不限。仅入口节点 enforce，多入口 LB 时每节点独立 bucket。
   uint64 rate_in_bps = 9;   // 上行 (客户端 → 入口) 带宽上限
   uint64 rate_out_bps = 10; // 下行 (target → 入口) 带宽上限
+  // #27 节点间链路加密开关。"" / "tls" = TLS（默认）；"plain" = TCP 不裹 TLS（同机房）。
+  // 仅影响 TCP raw_tunnel；UDP/QUIC 无视该字段，永远 TLS。
+  string link_encryption = 11;
 }
 
 message TargetEndpoint {
@@ -164,4 +167,6 @@ message TunnelHeader {
   // 非空 → 这是一条 UDP 隧道；该值为入口节点观测到的真实客户端 UDP src ip:port，
   // 出口节点据此维护反向回包 socket 映射。TCP 隧道留空。
   string udp_src_addr = 8;
+  // #27 节点间链路加密 — relay 据此决定下一跳是 TLS 还是 plain。"" / "tls" / "plain"。
+  string link_encryption = 9;
 }

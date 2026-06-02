@@ -112,6 +112,9 @@ pub struct ForwardRow {
     pub quota_reset_at_ms: Option<i64>,
     #[sqlx(default)]
     pub quota_exhausted_at_ms: Option<i64>,
+    /// migration 0012 #27 节点间链路加密。'tls' (默认) | 'plain'
+    #[sqlx(default)]
+    pub link_encryption: String,
 }
 
 impl ForwardRow {
@@ -188,6 +191,9 @@ pub struct Forward {
     pub quota_reset_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_exhausted_at_ms: Option<i64>,
+    /// #27 节点间链路加密。'tls' (默认) | 'plain'
+    #[serde(default)]
+    pub link_encryption: String,
 }
 
 /// 单个入口节点的 listener 状态。前端 forward list 显示徽章 + tooltip。
@@ -229,6 +235,11 @@ impl From<ForwardRow> for Forward {
             quota_reset: r.quota_reset,
             quota_reset_at_ms: r.quota_reset_at_ms,
             quota_exhausted_at_ms: r.quota_exhausted_at_ms,
+            link_encryption: if r.link_encryption.is_empty() {
+                "tls".into()
+            } else {
+                r.link_encryption
+            },
         }
     }
 }
@@ -264,6 +275,9 @@ pub struct ForwardCreate {
     pub rate_out_bps: Option<i64>,
     #[serde(default)]
     pub quota_reset: Option<String>, // 'none' | 'daily' | 'monthly'
+    /// #27 节点间链路加密。'tls' | 'plain'。admin-only。
+    #[serde(default)]
+    pub link_encryption: Option<String>,
 }
 
 impl ForwardCreate {

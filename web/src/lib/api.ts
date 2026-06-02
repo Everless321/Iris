@@ -97,6 +97,8 @@ export type Forward = {
   quota_reset?: "daily" | "monthly" | null;
   quota_reset_at_ms?: number | null;
   quota_exhausted_at_ms?: number | null;
+  // #27 节点间链路加密：'tls'（默认）/ 'plain'
+  link_encryption?: "tls" | "plain";
 };
 export type Enrollment = {
   token: string;

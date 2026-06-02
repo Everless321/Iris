@@ -628,6 +628,11 @@ impl Control for ControlSvc {
                 let strategy = if r.target_strategy.is_empty() { "weighted".into() } else { r.target_strategy.clone() };
                 let rate_in_bps = r.rate_in_bps.unwrap_or(0).max(0) as u64;
                 let rate_out_bps = r.rate_out_bps.unwrap_or(0).max(0) as u64;
+                let link_encryption = if r.link_encryption.is_empty() {
+                    "tls".into()
+                } else {
+                    r.link_encryption
+                };
                 #[allow(deprecated)]
                 Some(ForwardRule {
                     id: r.id,
@@ -640,6 +645,7 @@ impl Control for ControlSvc {
                     target_strategy: strategy,
                     rate_in_bps,
                     rate_out_bps,
+                    link_encryption,
                 })
             })
             .collect();

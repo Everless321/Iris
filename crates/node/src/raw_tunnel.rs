@@ -1,6 +1,13 @@
 // Phase 9a: 节点间数据面替代实现。
 // 直接 mTLS over TCP + 4-byte BE length-prefix framing，绕过 tonic / gRPC HTTP/2。
 // 每条连接服务一条 forward tunnel（与 gRPC Tunnel 语义一致）。
+//
+// #27 链路加密开关：
+//   - TLS 模式（默认）：监听 grpc+1 端口（7445），rustls mTLS
+//   - plain 模式：监听 grpc+3 端口（7447），TCP 不裹 TLS
+//   两者协议层完全一致（4B len-prefix header + 流式 frame），仅传输层差异。
+//   节点端永远同时监听两个端口；客户端按 forward.link_encryption 决定连哪个。
+//   relay 节点从 TunnelHeader.link_encryption 读取并 propagate 到下一跳。
 
 use anyhow::{anyhow, Context, Result};
 use prost::Message;
@@ -9,11 +16,9 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::dataplane::{effective_targets, link, NodeCtx, TargetRouter, TrafficCounter};
@@ -25,9 +30,11 @@ const BUF: usize = 64 * 1024;
 const MAX_HEADER: usize = 64 * 1024;
 const MAX_FRAME: usize = 256 * 1024;
 
+/// 统一的 transport 读写半端（TLS 或 plain TCP 都装箱成它）。
+pub type DynRead = Box<dyn AsyncRead + Unpin + Send>;
+pub type DynWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
 /// 用启动时已加载的 PEM 构造 rustls 双向 mTLS 配置（serve + dial）。
-/// 与现有 tonic ServerTlsConfig/ClientTlsConfig 同源（同 CA / 同 identity），
-/// 因此老 gRPC 7444 与新 raw 7445 是同一信任域。
 pub fn build_configs(
     ca_pem: &[u8],
     cert_pem: &[u8],
@@ -73,7 +80,7 @@ pub fn build_configs(
     Ok((Arc::new(server_cfg), Arc::new(client_cfg)))
 }
 
-async fn read_frame<R: AsyncReadExt + Unpin>(
+async fn read_frame<R: AsyncRead + Unpin>(
     r: &mut R,
     max: usize,
 ) -> std::io::Result<Option<Vec<u8>>> {
@@ -98,7 +105,7 @@ async fn read_frame<R: AsyncReadExt + Unpin>(
     Ok(Some(buf))
 }
 
-async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, data: &[u8]) -> std::io::Result<()> {
+async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> std::io::Result<()> {
     let len = data.len() as u32;
     w.write_all(&len.to_be_bytes()).await?;
     if !data.is_empty() {
@@ -107,15 +114,28 @@ async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, data: &[u8]) -> std::i
     Ok(())
 }
 
-/// "host:7444" → "host:7445"
+/// "host:7444" → "host:7445" (TLS raw)
 pub(crate) fn grpc_to_raw_addr(addr: &str) -> Option<String> {
     let (host, port_s) = addr.rsplit_once(':')?;
     let port: u16 = port_s.parse().ok()?;
     Some(format!("{host}:{}", port.checked_add(1)?))
 }
 
+/// "host:7444" → "host:7447" (plain raw, #27)
+pub(crate) fn grpc_to_raw_plain_addr(addr: &str) -> Option<String> {
+    let (host, port_s) = addr.rsplit_once(':')?;
+    let port: u16 = port_s.parse().ok()?;
+    Some(format!("{host}:{}", port.checked_add(3)?))
+}
+
+/// "plain" → plain；其余视为 "tls"
+fn is_plain(s: &str) -> bool {
+    s.eq_ignore_ascii_case("plain")
+}
+
 // ============================== Server ==============================
 
+/// TLS raw_tunnel listener（端口 = grpc + 1）。
 pub async fn serve(
     addr: SocketAddr,
     tls_acceptor: TlsAcceptor,
@@ -148,27 +168,63 @@ pub async fn serve(
                     return;
                 }
             };
-            if let Err(e) = handle_conn(tls, connector, ctx, lb, tr).await {
+            let (r, w) = tokio::io::split(tls);
+            let dr: DynRead = Box::new(r);
+            let dw: DynWrite = Box::new(w);
+            if let Err(e) = handle_conn(dr, dw, connector, ctx, lb, tr).await {
                 tracing::debug!(error = %e, "raw conn ended");
             }
         });
     }
 }
 
+/// #27 plain raw_tunnel listener（端口 = grpc + 3）。TCP 直通，不裹 TLS。
+pub async fn serve_plain(
+    addr: SocketAddr,
+    tls_connector: TlsConnector,
+    ctx: Arc<NodeCtx>,
+    lb: Arc<LoadBalancer>,
+    target_router: Arc<TargetRouter>,
+) -> Result<()> {
+    let listener = sock::tcp_listen(addr)?;
+    tracing::info!(%addr, "raw_tunnel server listening (plain, #27)");
+    loop {
+        let (sock, _peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, "raw_plain accept");
+                continue;
+            }
+        };
+        sock::tune_accepted(&sock);
+        let connector = tls_connector.clone();
+        let ctx = ctx.clone();
+        let lb = lb.clone();
+        let tr = target_router.clone();
+        tokio::spawn(async move {
+            let (r, w) = sock.into_split();
+            let dr: DynRead = Box::new(r);
+            let dw: DynWrite = Box::new(w);
+            if let Err(e) = handle_conn(dr, dw, connector, ctx, lb, tr).await {
+                tracing::debug!(error = %e, "raw_plain conn ended");
+            }
+        });
+    }
+}
+
 async fn handle_conn(
-    tls: ServerTlsStream<TcpStream>,
+    mut r: DynRead,
+    w: DynWrite,
     tls_connector: TlsConnector,
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
     tr: Arc<TargetRouter>,
 ) -> Result<()> {
-    let (mut r, w) = tokio::io::split(tls);
     let header_bytes = read_frame(&mut r, MAX_HEADER)
         .await?
         .ok_or_else(|| anyhow!("missing tunnel header"))?;
     let header = TunnelHeader::decode(&*header_bytes).context("decode TunnelHeader")?;
-    // Phase 9c 后 raw_tunnel 仅服务 TCP 路径。UDP 走 quic_tunnel。
-    // 容错：收到带 udp_src_addr 的 header 说明对端是 stale node，记 warn 拒绝。
+    // raw_tunnel 仅服务 TCP；UDP 走 quic_tunnel。
     if !header.udp_src_addr.is_empty() {
         return Err(anyhow!(
             "raw_tunnel received UDP-marked header from stale peer (src={})",
@@ -185,8 +241,8 @@ async fn handle_conn(
 async fn exit_tcp(
     header: &TunnelHeader,
     tr: &TargetRouter,
-    mut r: ReadHalf<ServerTlsStream<TcpStream>>,
-    mut w: WriteHalf<ServerTlsStream<TcpStream>>,
+    mut r: DynRead,
+    mut w: DynWrite,
 ) -> Result<()> {
     let targets = effective_targets(header);
     if targets.is_empty() {
@@ -248,8 +304,8 @@ async fn relay(
     ctx: Arc<NodeCtx>,
     lb: Arc<LoadBalancer>,
     tls_connector: TlsConnector,
-    mut r: ReadHalf<ServerTlsStream<TcpStream>>,
-    mut w: WriteHalf<ServerTlsStream<TcpStream>>,
+    mut r: DynRead,
+    mut w: DynWrite,
 ) -> Result<()> {
     let relay_targets = effective_targets(header);
     let view = ctx.view();
@@ -263,14 +319,13 @@ async fn relay(
         header.forward_id,
         header.hop_index,
         &header.udp_src_addr,
+        &header.link_encryption,
         &view,
         tls_connector,
     )
     .await?;
 
-    // 中转 = 解密后的明文字节流透传。frame 边界在 entry/exit 维护，relay 不需要解析。
-    // tokio::io::copy 用 8KB 栈 buffer 流式拷贝，无 Vec alloc + 无 length-prefix decode + 无 task spawn 开销。
-    // 任一方向 EOF/Err 自动结束（try_join 任一 Err 立即 cancel 另一边，等价原 link 行为）。
+    // 中转 = 流式透传。frame 边界在 entry/exit 维护，relay 不解析。
     let _ = tokio::try_join!(
         tokio::io::copy(&mut r, &mut nw),
         tokio::io::copy(&mut nr, &mut w),
@@ -280,8 +335,7 @@ async fn relay(
 
 // ============================== Client ==============================
 
-/// 向下一跳建立 raw mTLS tunnel，发送 header 首帧，返回 split 读写两端。
-/// 入口节点用、relay 节点中转也用。
+/// 向下一跳建立 raw tunnel（TLS or plain），发送 header 首帧，返回 split 读写两端。
 #[allow(clippy::too_many_arguments)]
 pub async fn open_next_hop(
     ctx: &NodeCtx,
@@ -293,30 +347,34 @@ pub async fn open_next_hop(
     forward_id: i64,
     hop_index: u32,
     udp_src_addr: &str,
+    link_encryption: &str,
     view: &NodeView,
     tls_connector: TlsConnector,
-) -> Result<(
-    ReadHalf<ClientTlsStream<TcpStream>>,
-    WriteHalf<ClientTlsStream<TcpStream>>,
-)> {
+) -> Result<(DynRead, DynWrite)> {
     let hop = &remaining_hops[0];
     let ip: IpAddr = client_ip
         .parse()
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     let candidates = lb.select_ordered(forward_id, hop_index as usize, hop, ip, view);
     let rest: Vec<Hop> = remaining_hops[1..].to_vec();
+    let plain = is_plain(link_encryption);
     for node_id in &candidates {
         let addr = match ctx.addr_of(node_id) {
             Some(a) => a,
             None => continue,
         };
-        let raw_addr = match grpc_to_raw_addr(&addr) {
+        let next_addr = if plain {
+            grpc_to_raw_plain_addr(&addr)
+        } else {
+            grpc_to_raw_addr(&addr)
+        };
+        let next_addr = match next_addr {
             Some(a) => a,
             None => continue,
         };
         match try_open(
             node_id,
-            &raw_addr,
+            &next_addr,
             &rest,
             targets,
             target_strategy,
@@ -324,16 +382,18 @@ pub async fn open_next_hop(
             forward_id,
             hop_index + 1,
             udp_src_addr,
+            link_encryption,
+            plain,
             tls_connector.clone(),
         )
         .await
         {
             Ok(parts) => {
-                tracing::info!(hop = hop_index, pick = %node_id, "raw next-hop selected");
+                tracing::info!(hop = hop_index, pick = %node_id, plain, "raw next-hop selected");
                 return Ok(parts);
             }
             Err(e) => {
-                tracing::warn!(node = %node_id, error = %e, "raw next-hop failed");
+                tracing::warn!(node = %node_id, error = %e, plain, "raw next-hop failed");
                 continue;
             }
         }
@@ -352,16 +412,21 @@ async fn try_open(
     forward_id: i64,
     next_hop_index: u32,
     udp_src_addr: &str,
+    link_encryption: &str,
+    plain: bool,
     tls_connector: TlsConnector,
-) -> Result<(
-    ReadHalf<ClientTlsStream<TcpStream>>,
-    WriteHalf<ClientTlsStream<TcpStream>>,
-)> {
+) -> Result<(DynRead, DynWrite)> {
     let sock = sock::tcp_connect(addr).await?;
-    // SNI 用对方 node_id：rustls 校验对端 cert SAN 含此 node_id，绑定 cert 到具体节点身份。
-    let server_name = ServerName::try_from(peer_node_id.to_string())?;
-    let tls = tls_connector.connect(server_name, sock).await?;
-    let (r, mut w) = tokio::io::split(tls);
+    let (dr, mut dw): (DynRead, DynWrite) = if plain {
+        let (r, w) = sock.into_split();
+        (Box::new(r), Box::new(w))
+    } else {
+        // SNI = peer node_id → rustls 校验 cert SAN
+        let server_name = ServerName::try_from(peer_node_id.to_string())?;
+        let tls = tls_connector.connect(server_name, sock).await?;
+        let (r, w) = tokio::io::split(tls);
+        (Box::new(r), Box::new(w))
+    };
 
     let legacy_target = targets
         .first()
@@ -376,20 +441,20 @@ async fn try_open(
         targets: targets.to_vec(),
         target_strategy: target_strategy.to_string(),
         udp_src_addr: udp_src_addr.to_string(),
+        link_encryption: link_encryption.to_string(),
     };
     let buf = header.encode_to_vec();
-    write_frame(&mut w, &buf).await?;
-    Ok((r, w))
+    write_frame(&mut dw, &buf).await?;
+    Ok((dr, dw))
 }
 
 // ============================== Entry helpers ==============================
 
-/// TCP 入口连接 → raw tunnel 桥接。traffic 由入口节点的 ActiveForward 共享 (仅入口统计)。
-/// session 跟 traffic 平行累加：traffic 是全 forward 累计字节，session 是单条 TCP 会话字节。
+/// TCP 入口连接 → raw tunnel 桥接。
 pub async fn handle_entry_tcp(
     inbound: TcpStream,
-    nr: ReadHalf<ClientTlsStream<TcpStream>>,
-    nw: WriteHalf<ClientTlsStream<TcpStream>>,
+    nr: DynRead,
+    nw: DynWrite,
     traffic: Arc<TrafficCounter>,
     session: Arc<crate::session::SessionState>,
     rate: Arc<crate::ratelimit::RateLimit>,
@@ -437,4 +502,3 @@ pub async fn handle_entry_tcp(
     });
     link(up, down);
 }
-
