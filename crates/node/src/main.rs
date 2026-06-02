@@ -2,6 +2,7 @@ mod dataplane;
 mod forward;
 mod lb;
 mod quic_tunnel;
+mod ratelimit;
 mod raw_tunnel;
 mod session;
 mod sock;
@@ -105,25 +106,28 @@ async fn spawn_forward(
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
     let mut bind_rxs: Vec<tokio::sync::oneshot::Receiver<Result<(), String>>> = Vec::new();
     let traffic = Arc::new(dataplane::TrafficCounter::default());
+    // #39 per-forward 速率限制（TCP 和 UDP 共享同一份 bucket；0 = 该方向不限）
+    let rate = Arc::new(ratelimit::RateLimit::new(f.rate_in_bps, f.rate_out_bps));
 
     if has_tcp {
         let (tx, rx) = tokio::sync::oneshot::channel();
         bind_rxs.push(rx);
         if f.hops.len() == 1 {
-            let (t, s, tc, ss, ent) = (
+            let (t, s, tc, ss, ent, rl) = (
                 targets.clone(),
                 target_strategy.clone(),
                 traffic.clone(),
                 sessions.clone(),
                 entry_node_id_arc.clone(),
+                rate.clone(),
             );
             handles.push(tokio::spawn(async move {
-                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc, ss, ent, tx).await {
+                if let Err(e) = forward::run_single_hop(port, fid, t, s, tc, ss, ent, rl, tx).await {
                     tracing::error!(error = %e, "tcp single-hop entry exited");
                 }
             }));
         } else {
-            let (hops, t, s, ctx2, lb2, tc, ss, ent) = (
+            let (hops, t, s, ctx2, lb2, tc, ss, ent, rl) = (
                 f.hops.clone(),
                 targets.clone(),
                 target_strategy.clone(),
@@ -132,10 +136,11 @@ async fn spawn_forward(
                 traffic.clone(),
                 sessions.clone(),
                 entry_node_id_arc.clone(),
+                rate.clone(),
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent, tx).await
+                    dataplane::run_multi_hop_entry(port, fid, hops, t, s, ctx2, lb2, tc, ss, ent, rl, tx).await
                 {
                     tracing::error!(error = %e, "tcp multi-hop entry exited");
                 }
@@ -146,29 +151,31 @@ async fn spawn_forward(
         let (tx, rx) = tokio::sync::oneshot::channel();
         bind_rxs.push(rx);
         if f.hops.len() == 1 {
-            let (t, s, tr, tc) = (
+            let (t, s, tr, tc, rl) = (
                 targets.clone(),
                 target_strategy.clone(),
                 target_router.clone(),
                 traffic.clone(),
+                rate.clone(),
             );
             handles.push(tokio::spawn(async move {
-                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr, tc, tx).await {
+                if let Err(e) = udp_forward::run_udp_single_hop(port, fid, t, s, tr, tc, rl, tx).await {
                     tracing::error!(error = %e, "udp single-hop entry exited");
                 }
             }));
         } else {
-            let (hops, t, s, ctx2, lb2, tc) = (
+            let (hops, t, s, ctx2, lb2, tc, rl) = (
                 f.hops.clone(),
                 targets.clone(),
                 target_strategy.clone(),
                 ctx.clone(),
                 lb.clone(),
                 traffic.clone(),
+                rate.clone(),
             );
             handles.push(tokio::spawn(async move {
                 if let Err(e) =
-                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2, tc, tx).await
+                    udp_forward::run_udp_multi_hop(port, fid, hops, t, s, ctx2, lb2, tc, rl, tx).await
                 {
                     tracing::error!(error = %e, "udp multi-hop entry exited");
                 }

@@ -21,6 +21,7 @@ pub async fn run_single_hop(
     traffic: Arc<TrafficCounter>,
     sessions: Arc<SessionTable>,
     entry_node_id: Arc<String>,
+    rate: Arc<crate::ratelimit::RateLimit>,
     bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
@@ -49,13 +50,14 @@ pub async fn run_single_hop(
         sock::tune_accepted(&inbound);
         let client_ip = peer.ip().to_string();
         let client_port = peer.port() as u32;
-        let (targets, strategy, router, traffic, sessions, entry_node_id) = (
+        let (targets, strategy, router, traffic, sessions, entry_node_id, rate) = (
             targets.clone(),
             strategy.clone(),
             router.clone(),
             traffic.clone(),
             sessions.clone(),
             entry_node_id.clone(),
+            rate.clone(),
         );
         tokio::spawn(async move {
             let ordered = router.order(&targets, &strategy, &client_ip, forward_id);
@@ -91,12 +93,15 @@ pub async fn run_single_hop(
             let (mut tr, mut tw) = outbound.into_split();
             let traffic_up = traffic.clone();
             let sess_up = session.clone();
+            let rate_up = rate.up.clone();
             let up = tokio::spawn(async move {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
                     match ir.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            // #39 限速：阻塞直到 token bucket 放行（None 时立即 return）
+                            crate::ratelimit::throttle(&rate_up, n).await;
                             traffic_up.add_in(n);
                             sess_up.add_in(n);
                             if tw.write_all(&buf[..n]).await.is_err() {
@@ -108,12 +113,14 @@ pub async fn run_single_hop(
             });
             let traffic_dn = traffic.clone();
             let sess_dn = session.clone();
+            let rate_down = rate.down.clone();
             let down = tokio::spawn(async move {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
                     match tr.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            crate::ratelimit::throttle(&rate_down, n).await;
                             if iw.write_all(&buf[..n]).await.is_err() {
                                 break;
                             }

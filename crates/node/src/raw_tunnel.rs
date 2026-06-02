@@ -392,18 +392,21 @@ pub async fn handle_entry_tcp(
     nw: WriteHalf<ClientTlsStream<TcpStream>>,
     traffic: Arc<TrafficCounter>,
     session: Arc<crate::session::SessionState>,
+    rate: Arc<crate::ratelimit::RateLimit>,
 ) {
     let (mut ir, mut iw) = inbound.into_split();
     let mut nr = nr;
     let mut nw = nw;
     let traffic_up = traffic.clone();
     let sess_up = session.clone();
+    let rate_up = rate.up.clone();
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; BUF];
         loop {
             match ir.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    crate::ratelimit::throttle(&rate_up, n).await;
                     traffic_up.add_in(n);
                     sess_up.add_in(n);
                     if write_frame(&mut nw, &buf[..n]).await.is_err() {
@@ -415,11 +418,13 @@ pub async fn handle_entry_tcp(
     });
     let traffic_dn = traffic;
     let sess_dn = session;
+    let rate_down = rate.down.clone();
     let down = tokio::spawn(async move {
         loop {
             match read_frame(&mut nr, MAX_FRAME).await {
                 Ok(Some(data)) => {
                     let n = data.len();
+                    crate::ratelimit::throttle(&rate_down, n).await;
                     if iw.write_all(&data).await.is_err() {
                         break;
                     }

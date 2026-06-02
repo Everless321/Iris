@@ -286,6 +286,7 @@ pub async fn run_multi_hop_entry(
     traffic: Arc<TrafficCounter>,
     sessions: Arc<crate::session::SessionTable>,
     entry_node_id: Arc<String>,
+    rate: Arc<crate::ratelimit::RateLimit>,
     bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
@@ -314,7 +315,7 @@ pub async fn run_multi_hop_entry(
         let hops_rest = hops[1..].to_vec();
         let client_ip = peer.ip().to_string();
         let client_port = peer.port() as u32;
-        let (targets, strategy, ctx, lb, traffic, sessions, entry_node_id) = (
+        let (targets, strategy, ctx, lb, traffic, sessions, entry_node_id, rate) = (
             targets.clone(),
             target_strategy.clone(),
             ctx.clone(),
@@ -322,11 +323,12 @@ pub async fn run_multi_hop_entry(
             traffic.clone(),
             sessions.clone(),
             entry_node_id.clone(),
+            rate.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = handle_entry_conn(
                 inbound, hops_rest, &targets, &strategy, &client_ip, client_port,
-                forward_id, &ctx, &lb, &traffic, &sessions, &entry_node_id,
+                forward_id, &ctx, &lb, &traffic, &sessions, &entry_node_id, &rate,
             )
             .await
             {
@@ -350,6 +352,7 @@ async fn handle_entry_conn(
     traffic: &Arc<TrafficCounter>,
     sessions: &Arc<crate::session::SessionTable>,
     entry_node_id: &str,
+    rate: &Arc<crate::ratelimit::RateLimit>,
 ) -> Result<()> {
     let view = ctx.view();
     // hops_path V1：仅入口节点 id（V2 再展开实际选中的每跳节点）。
@@ -371,7 +374,7 @@ async fn handle_entry_conn(
         )
         .await?;
         let _g = guard;
-        bridge_tcp(inbound, resp, req_tx, traffic.clone(), session.clone()).await;
+        bridge_tcp(inbound, resp, req_tx, traffic.clone(), session.clone(), rate.clone()).await;
         Ok::<(), anyhow::Error>(())
     } else {
         let (nr, nw) = crate::raw_tunnel::open_next_hop(
@@ -379,7 +382,7 @@ async fn handle_entry_conn(
             forward_id, 1, "", &view, ctx.raw_connector.clone(),
         )
         .await?;
-        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw, traffic.clone(), session.clone()).await;
+        crate::raw_tunnel::handle_entry_tcp(inbound, nr, nw, traffic.clone(), session.clone(), rate.clone()).await;
         Ok::<(), anyhow::Error>(())
     };
     session.close(if result.is_ok() { "normal" } else { "error" });
@@ -393,12 +396,15 @@ async fn bridge_tcp(
     req_tx: mpsc::Sender<Chunk>,
     traffic: Arc<TrafficCounter>,
     session: Arc<crate::session::SessionState>,
+    rate: Arc<crate::ratelimit::RateLimit>,
 ) {
     let (mut tr, mut tw) = inbound.into_split();
     let traffic_up = traffic.clone();
     let traffic_dn = traffic;
     let sess_up = session.clone();
     let sess_dn = session;
+    let rate_up = rate.up.clone();
+    let rate_down = rate.down.clone();
     tokio::select! {
         _ = async {
             let mut buf = vec![0u8; BUF];
@@ -406,6 +412,7 @@ async fn bridge_tcp(
                 match tr.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        crate::ratelimit::throttle(&rate_up, n).await;
                         traffic_up.add_in(n);
                         sess_up.add_in(n);
                         if req_tx.send(Chunk { header: None, data: buf[..n].to_vec() }).await.is_err() {
@@ -418,6 +425,7 @@ async fn bridge_tcp(
         _ = async {
             while let Ok(Some(c)) = resp.message().await {
                 let n = c.data.len();
+                crate::ratelimit::throttle(&rate_down, n).await;
                 if tw.write_all(&c.data).await.is_err() {
                     break;
                 }
