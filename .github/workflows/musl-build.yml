@@ -11,6 +11,9 @@ on:
       - '.github/workflows/musl-build.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write   # 自动覆盖 rolling release 所需
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -71,3 +74,28 @@ jobs:
             target/x86_64-unknown-linux-musl/release/iris-node
           retention-days: 14
           if-no-files-found: error
+
+      # 仅 main push 时自动覆盖 rolling release。资产名与 README/install-node.sh
+      # 期望的 iris-{master,node}-musl-x86_64 一致；标记 make_latest=true 让
+      # `releases/latest/download/...` URL 永远命中最新 main build。
+      - name: Stage rolling release assets
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/iris-master ./iris-master-musl-x86_64
+          cp target/x86_64-unknown-linux-musl/release/iris-node   ./iris-node-musl-x86_64
+
+      - name: Publish rolling release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rolling
+          name: "Rolling (auto-built from main)"
+          body: |
+            Auto-built from `main` on every push — assets are overwritten in place.
+            Commit: ${{ github.sha }}
+            For pinned stable versions, use a versioned tag (e.g. `v0.1.0`).
+          prerelease: false
+          make_latest: "true"
+          files: |
+            iris-master-musl-x86_64
+            iris-node-musl-x86_64
