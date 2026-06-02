@@ -8,6 +8,9 @@
 # 升级已有节点（替换 binary + 自动重启）：
 #   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --upgrade
 #
+# 升级 master（替换 iris-master + 重启 iris-master.service）：
+#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --upgrade-master
+#
 # 卸载节点（备份 + 移除）：
 #   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --uninstall
 #
@@ -41,8 +44,9 @@ while [ $# -gt 0 ]; do
     --release-tag)  RELEASE_TAG="$2"; shift 2 ;;
     --install-dir)  INSTALL_DIR="$2"; shift 2 ;;
     --data-addr)    DATA_ADDR="$2"; shift 2 ;;
-    --upgrade)      ACTION="upgrade"; shift ;;
-    --uninstall)    ACTION="uninstall"; shift ;;
+    --upgrade)        ACTION="upgrade"; shift ;;
+    --upgrade-master) ACTION="upgrade-master"; shift ;;
+    --uninstall)      ACTION="uninstall"; shift ;;
     --help|-h)      sed -n '1,/^set/p' "$0" | head -n -1 | sed 's/^# \?//'; exit 0 ;;
     *)              echo "未知参数: $1" >&2; exit 1 ;;
   esac
@@ -84,23 +88,25 @@ parse_json() {
 
 # ---- binary source resolution ----
 resolve_binary_url() {
+  local bin="${1:-iris-node}"
   if [ -n "$BINARY_URL" ]; then
     echo "$BINARY_URL"
   elif [ "$RELEASE_TAG" = "latest" ]; then
-    echo "https://github.com/${RELEASE_REPO}/releases/latest/download/iris-node-${ARCH_TAG}"
+    echo "https://github.com/${RELEASE_REPO}/releases/latest/download/${bin}-${ARCH_TAG}"
   else
-    echo "https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}/iris-node-${ARCH_TAG}"
+    echo "https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}/${bin}-${ARCH_TAG}"
   fi
 }
 
 download_binary() {
   local target="$1"
+  local bin="${2:-iris-node}"
   if [ -n "$BINARY" ]; then
     info "复制本地二进制 $BINARY → $target"
     cp "$BINARY" "$target"
   else
     local url
-    url=$(resolve_binary_url)
+    url=$(resolve_binary_url "$bin")
     info "下载二进制：$url"
     if ! curl -fsSL --retry 3 --retry-delay 2 -o "$target" "$url"; then
       rm -f "$target"
@@ -243,6 +249,43 @@ do_upgrade() {
   fi
 }
 
+# ---- action: upgrade master ----
+# 比 node upgrade 严格：master 是控制面单点,失败回滚必须成功。
+# 用 stop → swap → start（而不是 restart）以避免 mv 替换被运行中的 binary 锁住。
+do_upgrade_master() {
+  [ -x "$INSTALL_DIR/iris-master" ] \
+    || die "未检测到 master（$INSTALL_DIR/iris-master 不存在）"
+
+  local ts backup
+  ts=$(date +%s)
+  backup="$INSTALL_DIR/iris-master.bak.$ts"
+  info "备份当前 master → $backup"
+  cp "$INSTALL_DIR/iris-master" "$backup"
+
+  download_binary "$INSTALL_DIR/iris-master.new" "iris-master"
+
+  if command -v systemctl >/dev/null && systemctl list-unit-files iris-master.service >/dev/null 2>&1; then
+    info "stop iris-master.service"
+    systemctl stop iris-master.service
+    mv "$INSTALL_DIR/iris-master.new" "$INSTALL_DIR/iris-master"
+    info "start iris-master.service"
+    systemctl start iris-master.service
+    sleep 3
+    if systemctl is-active --quiet iris-master.service; then
+      ok "master 升级完成"
+    else
+      warn "启动失败，回滚到 $backup"
+      systemctl stop iris-master.service 2>/dev/null || true
+      mv "$backup" "$INSTALL_DIR/iris-master"
+      systemctl start iris-master.service
+      die "已回滚。journalctl -u iris-master --no-pager -n 30 查错"
+    fi
+  else
+    warn "无 systemd 或服务未注册，仅替换二进制：$INSTALL_DIR/iris-master"
+    mv "$INSTALL_DIR/iris-master.new" "$INSTALL_DIR/iris-master"
+  fi
+}
+
 # ---- action: uninstall ----
 do_uninstall() {
   if [ ! -d "$INSTALL_DIR" ]; then
@@ -273,7 +316,8 @@ do_uninstall() {
 
 # ---- dispatch ----
 case "$ACTION" in
-  install)   do_install ;;
-  upgrade)   do_upgrade ;;
-  uninstall) do_uninstall ;;
+  install)        do_install ;;
+  upgrade)        do_upgrade ;;
+  upgrade-master) do_upgrade_master ;;
+  uninstall)      do_uninstall ;;
 esac
