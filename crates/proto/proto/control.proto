@@ -29,6 +29,10 @@ message HeartbeatRequest {
   // closed 后再保留 1 轮（让 master 拿到 final bytes + close_reason）然后从节点删除。
   // master upsert by id：新 id INSERT，已知 id UPDATE bytes + closed_at + reason。
   repeated SessionEvent session_events = 7;
+  // 节点对外宣告的数据面地址 host:port（用于节点间 mTLS 互联，写入 nodes.addr）。
+  // 节点通常发 IRIS_DATA_ADDR 原文（如 "0.0.0.0:7444"）；master 检测到 host 是
+  // wildcard / loopback 时用 peer 源 IP 替换。空 = 老节点，master 不更新 addr。
+  string advertised_addr = 8;
 }
 
 // 单条 TCP 会话（每个 forward 入口 accept 的 connection）。
@@ -108,6 +112,9 @@ message ForwardRule {
   bool enabled = 6;
   repeated TargetEndpoint targets = 7; // 出口可达的多个目标，按 target_strategy 选 + failover
   string target_strategy = 8;          // weighted | source_hash | least_conn | latency
+  // #39 速率限制（bytes/sec）。0 = 不限。仅入口节点 enforce，多入口 LB 时每节点独立 bucket。
+  uint64 rate_in_bps = 9;   // 上行 (客户端 → 入口) 带宽上限
+  uint64 rate_out_bps = 10; // 下行 (target → 入口) 带宽上限
 }
 
 message TargetEndpoint {

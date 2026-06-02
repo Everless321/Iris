@@ -97,6 +97,21 @@ pub struct ForwardRow {
     pub bytes_in: i64,
     #[sqlx(default)]
     pub bytes_out: i64,
+    // migration 0011 #39 流量限制：NULL 表示该机制不启用
+    #[sqlx(default)]
+    pub quota_in_bytes: Option<i64>,
+    #[sqlx(default)]
+    pub quota_out_bytes: Option<i64>,
+    #[sqlx(default)]
+    pub rate_in_bps: Option<i64>,
+    #[sqlx(default)]
+    pub rate_out_bps: Option<i64>,
+    #[sqlx(default)]
+    pub quota_reset: Option<String>,           // 'none' | 'daily' | 'monthly'
+    #[sqlx(default)]
+    pub quota_reset_at_ms: Option<i64>,
+    #[sqlx(default)]
+    pub quota_exhausted_at_ms: Option<i64>,
 }
 
 impl ForwardRow {
@@ -153,11 +168,26 @@ pub struct Forward {
     /// 或者该 forward 不是入口（已被 master sync_config 过滤）
     #[serde(default)]
     pub listener_status: Vec<ListenerNodeStatus>,
-    /// 累计流量（自 forward 创建以来）。bytes_in = 上行，bytes_out = 下行。
+    /// 累计流量（自 forward 创建以来 / 上次 quota reset 以来）。bytes_in = 上行，bytes_out = 下行。
     #[serde(default)]
     pub bytes_in: i64,
     #[serde(default)]
     pub bytes_out: i64,
+    // #39 流量限制 - UI 展示 + 编辑
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_in_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_out_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_in_bps: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_out_bps: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_exhausted_at_ms: Option<i64>,
 }
 
 /// 单个入口节点的 listener 状态。前端 forward list 显示徽章 + tooltip。
@@ -192,6 +222,13 @@ impl From<ForwardRow> for Forward {
             listener_status: Vec::new(),
             bytes_in: r.bytes_in,
             bytes_out: r.bytes_out,
+            quota_in_bytes: r.quota_in_bytes,
+            quota_out_bytes: r.quota_out_bytes,
+            rate_in_bps: r.rate_in_bps,
+            rate_out_bps: r.rate_out_bps,
+            quota_reset: r.quota_reset,
+            quota_reset_at_ms: r.quota_reset_at_ms,
+            quota_exhausted_at_ms: r.quota_exhausted_at_ms,
         }
     }
 }
@@ -216,6 +253,17 @@ pub struct ForwardCreate {
     pub targets: Option<Vec<TargetEndpoint>>,
     #[serde(default = "default_strategy")]
     pub target_strategy: String,
+    // #39 流量限制（创建 + 编辑共用）；None / 0 视为"不启用该方向"，全部 NULL 等价无限制
+    #[serde(default)]
+    pub quota_in_bytes: Option<i64>,
+    #[serde(default)]
+    pub quota_out_bytes: Option<i64>,
+    #[serde(default)]
+    pub rate_in_bps: Option<i64>,
+    #[serde(default)]
+    pub rate_out_bps: Option<i64>,
+    #[serde(default)]
+    pub quota_reset: Option<String>, // 'none' | 'daily' | 'monthly'
 }
 
 impl ForwardCreate {

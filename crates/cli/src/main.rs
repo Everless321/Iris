@@ -8,12 +8,23 @@ struct Cli {
     /// master HTTP API 地址
     #[arg(long, default_value = "http://127.0.0.1:7080", global = true)]
     api: String,
+    /// Bearer token（可选；未传时回退到 IRIS_TOKEN 环境变量）。
+    /// 通过 `iris-cli login` 获取，或从浏览器/admin 拷贝。
+    #[arg(long, global = true)]
+    token: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 登录获取 JWT token；打印到 stdout 便于 `export IRIS_TOKEN=$(iris-cli login ...)`
+    Login {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        password: String,
+    },
     /// 列出节点
     ListNodes,
     /// 新增节点
@@ -63,20 +74,27 @@ enum Cmd {
     },
 }
 
-fn get(url: &str) -> Result<()> {
-    let body = ureq::get(url).call()?.into_string()?;
+fn auth_header(req: ureq::Request, token: Option<&str>) -> ureq::Request {
+    match token {
+        Some(t) if !t.is_empty() => req.set("Authorization", &format!("Bearer {t}")),
+        _ => req,
+    }
+}
+
+fn get(url: &str, token: Option<&str>) -> Result<()> {
+    let body = auth_header(ureq::get(url), token).call()?.into_string()?;
     println!("{}", pretty(&body));
     Ok(())
 }
 
-fn post(url: &str, payload: serde_json::Value) -> Result<()> {
-    let body = ureq::post(url).send_json(payload)?.into_string()?;
+fn post(url: &str, payload: serde_json::Value, token: Option<&str>) -> Result<()> {
+    let body = auth_header(ureq::post(url), token).send_json(payload)?.into_string()?;
     println!("{}", pretty(&body));
     Ok(())
 }
 
-fn delete(url: &str) -> Result<()> {
-    ureq::delete(url).call()?;
+fn delete(url: &str, token: Option<&str>) -> Result<()> {
+    auth_header(ureq::delete(url), token).call()?;
     println!("deleted");
     Ok(())
 }
@@ -125,14 +143,30 @@ fn pretty(s: &str) -> String {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let api = cli.api.trim_end_matches('/');
+    let token = cli.token.or_else(|| std::env::var("IRIS_TOKEN").ok());
+    let tok = token.as_deref();
     match cli.cmd {
-        Cmd::ListNodes => get(&format!("{api}/api/nodes"))?,
+        Cmd::Login { username, password } => {
+            let resp = ureq::post(&format!("{api}/api/auth/login"))
+                .send_json(json!({"username": username, "password": password}))?
+                .into_string()?;
+            let v: serde_json::Value = serde_json::from_str(&resp)?;
+            match v.get("token").and_then(|t| t.as_str()) {
+                Some(t) => println!("{t}"),
+                None => {
+                    eprintln!("登录失败：{resp}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Cmd::ListNodes => get(&format!("{api}/api/nodes"), tok)?,
         Cmd::AddNode { id, name, addr, weight } => post(
             &format!("{api}/api/nodes"),
             json!({"id": id, "name": name, "addr": addr, "weight": weight}),
+            tok,
         )?,
-        Cmd::DelNode { id } => delete(&format!("{api}/api/nodes/{id}"))?,
-        Cmd::ListForwards => get(&format!("{api}/api/forwards"))?,
+        Cmd::DelNode { id } => delete(&format!("{api}/api/nodes/{id}"), tok)?,
+        Cmd::ListForwards => get(&format!("{api}/api/forwards"), tok)?,
         Cmd::AddForward { name, listen, path, hops, target, protocol } => {
             let mut body = json!({
                 "name": name,
@@ -145,9 +179,9 @@ fn main() -> Result<()> {
                 (None, Some(p)) => body["path"] = json!(p),
                 (None, None) => anyhow::bail!("需提供 --path 或 --hops"),
             }
-            post(&format!("{api}/api/forwards"), body)?
+            post(&format!("{api}/api/forwards"), body, tok)?
         }
-        Cmd::DelForward { id } => delete(&format!("{api}/api/forwards/{id}"))?,
+        Cmd::DelForward { id } => delete(&format!("{api}/api/forwards/{id}"), tok)?,
     }
     Ok(())
 }

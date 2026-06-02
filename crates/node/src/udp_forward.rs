@@ -15,6 +15,15 @@ use iris_proto::control::{Hop, TargetEndpoint};
 
 const SESSION_IDLE_MS: i64 = 60_000;
 const GC_INTERVAL: Duration = Duration::from_secs(10);
+/// 单 forward 上 UDP src 会话上限，防恶意源 IP 喷射撑爆 map / 后台 task。
+/// 超过阈值后丢弃新 src 的首包；现有会话不受影响，60s idle GC 自然回收。
+/// 可通过 IRIS_UDP_MAX_SESSIONS 覆盖（0 表示无上限）。
+fn max_udp_sessions() -> usize {
+    std::env::var("IRIS_UDP_MAX_SESSIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4096)
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -88,6 +97,7 @@ pub async fn run_udp_single_hop(
     spawn_single_gc(map.clone());
     let targets = Arc::new(targets);
     let strategy = Arc::new(target_strategy);
+    let cap = max_udp_sessions();
 
     let mut buf = vec![0u8; UDP_BUF];
     loop {
@@ -108,7 +118,11 @@ pub async fn run_udp_single_hop(
             continue;
         }
 
-        // 新会话：选 target → 建出口 socket → 入 map → 起反向 recv task → 发首包
+        // 新会话：容量上限 → 选 target → 建出口 socket → 入 map → 起反向 recv task → 发首包
+        if cap > 0 && map.read().await.len() >= cap {
+            tracing::warn!(cap, %src, "udp single session map full, drop new src");
+            continue;
+        }
         let ordered = target_router.order(&targets, &strategy, &src.ip().to_string(), forward_id);
         let pick = match ordered.first() {
             Some(p) => p.clone(),
@@ -231,6 +245,7 @@ pub async fn run_udp_multi_hop(
     let hops_rest: Vec<Hop> = hops[1..].to_vec();
     let map: MultiMap = Arc::default();
     spawn_multi_gc(map.clone());
+    let cap = max_udp_sessions();
 
     let mut buf = vec![0u8; UDP_BUF];
     loop {
@@ -250,6 +265,12 @@ pub async fn run_udp_multi_hop(
             if quic_tunnel::udp_send_packet(&s.conn, &data).is_err() {
                 map.write().await.remove(&src);
             }
+            continue;
+        }
+
+        // 容量上限：撑爆 map 前丢弃新 src 的首包
+        if cap > 0 && map.read().await.len() >= cap {
+            tracing::warn!(cap, %src, "udp multi session map full, drop new src");
             continue;
         }
 

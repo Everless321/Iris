@@ -595,6 +595,7 @@ async fn main() -> Result<()> {
                 traffic_stats,
                 cert_not_after_ms: cert_not_after.load(Ordering::Relaxed),
                 session_events: session_table.snapshot_and_gc(),
+                advertised_addr: data_addr.clone(),
             })
             .await
         {

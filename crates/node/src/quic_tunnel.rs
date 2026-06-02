@@ -201,7 +201,7 @@ async fn exit_udp(conn: &quinn::Connection, header: &TunnelHeader, tr: &TargetRo
     // up: QUIC datagram → UdpSocket::send(target)
     let conn_up = conn.clone();
     let usock_up = usock.clone();
-    let up = tokio::spawn(async move {
+    let mut up = tokio::spawn(async move {
         loop {
             match conn_up.read_datagram().await {
                 Ok(b) if !b.is_empty() => {
@@ -217,7 +217,7 @@ async fn exit_udp(conn: &quinn::Connection, header: &TunnelHeader, tr: &TargetRo
     // down: UdpSocket::recv → QUIC datagram → entry
     let conn_dn = conn.clone();
     let usock_dn = usock;
-    let down = tokio::spawn(async move {
+    let mut down = tokio::spawn(async move {
         let mut buf = vec![0u8; UDP_BUF];
         loop {
             match usock_dn.recv(&mut buf).await {
@@ -233,8 +233,12 @@ async fn exit_udp(conn: &quinn::Connection, header: &TunnelHeader, tr: &TargetRo
             }
         }
     });
-    // 任意一端结束就中止另一端
-    tokio::select! { _ = up => {}, _ = down => {} }
+    // 任意一端结束就显式 abort 另一端，避免 task / 半开连接残留
+    tokio::select! {
+        _ = &mut up => { down.abort(); let _ = down.await; }
+        _ = &mut down => { up.abort(); let _ = up.await; }
+    }
+    conn.close(0u32.into(), b"exit done");
     Ok(())
 }
 
@@ -263,7 +267,7 @@ async fn relay(
 
     let up_conn = upstream.clone();
     let dn_conn = downstream.clone();
-    let up = tokio::spawn(async move {
+    let mut up = tokio::spawn(async move {
         loop {
             match up_conn.read_datagram().await {
                 Ok(b) if !b.is_empty() => {
@@ -278,7 +282,7 @@ async fn relay(
     });
     let dn_conn2 = downstream.clone();
     let up_conn2 = upstream.clone();
-    let down = tokio::spawn(async move {
+    let mut down = tokio::spawn(async move {
         loop {
             match dn_conn2.read_datagram().await {
                 Ok(b) if !b.is_empty() => {
@@ -291,7 +295,13 @@ async fn relay(
             }
         }
     });
-    tokio::select! { _ = up => {}, _ = down => {} }
+    tokio::select! {
+        _ = &mut up => { down.abort(); let _ = down.await; }
+        _ = &mut down => { up.abort(); let _ = up.await; }
+    }
+    // 关掉两端 connection，避免半开链路在对端等 idle_timeout 才回收
+    upstream.close(0u32.into(), b"relay done");
+    downstream.close(0u32.into(), b"relay done");
     Ok(())
 }
 

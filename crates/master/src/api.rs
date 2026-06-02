@@ -402,12 +402,20 @@ async fn create_forward(
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
     let targets_json = serde_json::to_string(&targets).map_err(err)?;
     let now = now_ms();
+    // #39 quota 字段 + 下次重置时戳（reset='none' / NULL 则 quota_reset_at_ms 也 NULL）
+    let q_reset = normalize_quota_reset(f.quota_reset.as_deref());
+    let q_reset_at = crate::compute_next_reset_at_ms(q_reset.as_deref(), now);
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO forwards (name,listen_port,protocol,path,target,target_strategy,enabled,created_at,owner_id) \
-         VALUES (?,?,?,?,?,?,1,?,?) RETURNING id",
+        "INSERT INTO forwards \
+         (name,listen_port,protocol,path,target,target_strategy,enabled,created_at,owner_id, \
+          quota_in_bytes,quota_out_bytes,rate_in_bps,rate_out_bps,quota_reset,quota_reset_at_ms) \
+         VALUES (?,?,?,?,?,?,1,?,?, ?,?,?,?,?,?) RETURNING id",
     )
     .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
     .bind(&targets_json).bind(&f.target_strategy).bind(now).bind(claims.sub)
+    .bind(nz_opt(f.quota_in_bytes)).bind(nz_opt(f.quota_out_bytes))
+    .bind(nz_opt(f.rate_in_bps)).bind(nz_opt(f.rate_out_bps))
+    .bind(&q_reset).bind(q_reset_at)
     .fetch_one(&s.pool).await
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
@@ -422,7 +430,32 @@ async fn create_forward(
         enabled: true, created_at: now, owner_id: claims.sub,
         listener_status: Vec::new(),
         bytes_in: 0, bytes_out: 0,
+        quota_in_bytes: nz_opt(f.quota_in_bytes),
+        quota_out_bytes: nz_opt(f.quota_out_bytes),
+        rate_in_bps: nz_opt(f.rate_in_bps),
+        rate_out_bps: nz_opt(f.rate_out_bps),
+        quota_reset: q_reset,
+        quota_reset_at_ms: q_reset_at,
+        quota_exhausted_at_ms: None,
     }))
+}
+
+/// 把 0 / 负数视为"未启用该字段"，None 也视为未启用。统一规约成 NULL。
+fn nz_opt(v: Option<i64>) -> Option<i64> {
+    v.filter(|&x| x > 0)
+}
+
+/// 规范化 quota_reset 字符串为合法枚举或 None。
+fn normalize_quota_reset(v: Option<&str>) -> Option<String> {
+    match v.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("daily") => Some("daily".into()),
+        Some("monthly") => Some("monthly".into()),
+        Some("none") | None => None, // 'none' 视为无重置策略（quota_reset_at_ms = NULL）
+        Some(other) => {
+            tracing::warn!(value = %other, "未知 quota_reset，按 none 处理");
+            None
+        }
+    }
 }
 
 /// 编辑转发：admin 可改任意，customer 只能改自己。
@@ -474,11 +507,21 @@ async fn update_forward(
     check_entry_port_conflict(&s.pool, f.listen_port, &protocol, &entry_ids, Some(id)).await?;
     let hops_json = serde_json::to_string(&hops).map_err(err)?;
     let targets_json = serde_json::to_string(&targets).map_err(err)?;
+    // #39 编辑时也可调整 quota / rate / 重置策略。reset 策略变更时同步刷新 quota_reset_at_ms。
+    let q_reset = normalize_quota_reset(f.quota_reset.as_deref());
+    let q_reset_at = crate::compute_next_reset_at_ms(q_reset.as_deref(), now_ms());
     sqlx::query(
-        "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=?, target_strategy=? WHERE id=?",
+        "UPDATE forwards SET name=?, listen_port=?, protocol=?, path=?, target=?, target_strategy=?, \
+         quota_in_bytes=?, quota_out_bytes=?, rate_in_bps=?, rate_out_bps=?, \
+         quota_reset=?, quota_reset_at_ms=? \
+         WHERE id=?",
     )
     .bind(&f.name).bind(f.listen_port).bind(&protocol).bind(&hops_json)
-    .bind(&targets_json).bind(&f.target_strategy).bind(id)
+    .bind(&targets_json).bind(&f.target_strategy)
+    .bind(nz_opt(f.quota_in_bytes)).bind(nz_opt(f.quota_out_bytes))
+    .bind(nz_opt(f.rate_in_bps)).bind(nz_opt(f.rate_out_bps))
+    .bind(&q_reset).bind(q_reset_at)
+    .bind(id)
     .execute(&s.pool).await
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
