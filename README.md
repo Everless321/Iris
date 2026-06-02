@@ -56,29 +56,29 @@ sudo systemctl enable --now iris-master
 在 Web UI 添加节点 → 系统生成 enrollment token → 复制安装命令到目标服务器执行：
 
 ```bash
-curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- \
   --master https://<MASTER>:7080 \
   --token <ENROLLMENT_TOKEN>
 ```
 
 脚本会：自动检测架构 → 下载 `iris-node` → 调 enroll API 兑换 mTLS 证书 → 写 systemd unit → 启动服务。**约 30 秒节点上线**。
 
-> `/install.sh` 端点是 302 redirect 到 [仓库根 `install.sh`](install.sh)（脚本 source of truth）。
-> master 离线时也可直接用：`curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- ...`
+> 脚本 source of truth 是 [仓库根 `install.sh`](install.sh)（GitHub raw URL）。master HTTP `/install.sh` 端点
+> 提供 302 redirect 作为兼容入口，但**推荐直接用 GitHub raw URL**：master 离线时也能装新节点，且永远是最新版本。
 
 **升级节点**：
 ```bash
-curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- --upgrade
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --upgrade
 ```
 
 **升级 master**（同一脚本，在 master 主机上跑）：
 ```bash
-curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- --upgrade-master
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --upgrade-master
 ```
 
 **卸载节点**（自动备份 cert + 配置到 `/tmp/iris-uninstall-*.tar.gz`）：
 ```bash
-curl -fsSL https://<MASTER>:7080/install.sh | sudo bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --uninstall
 ```
 
 ## 🏗️ 架构

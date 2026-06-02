@@ -36,7 +36,7 @@ sudo journalctl -u iris-master -f
 master 启动后访问 `http://<MASTER>:7080`，登录 admin，创建节点 → 系统生成 enrollment token → 节点服务器执行:
 
 ```bash
-curl -fsSL http://<MASTER>:7080/install.sh | sudo bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- \
   --master http://<MASTER>:7080 \
   --token <TOKEN>
 ```

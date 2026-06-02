@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Iris 节点一键安装脚本 V2
 #
+# 脚本来源（canonical）：https://raw.githubusercontent.com/Everless321/Iris/main/install.sh
+# master HTTP `/install.sh` 也提供 302 redirect 兜底，但**主推 GitHub raw**：master 离线也能装新节点。
+#
 # 安装新节点（首次）：
-#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- \
-#     --master https://<MASTER> --token <ENROLLMENT_TOKEN>
+#   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- \
+#     --master https://<MASTER_IP> --token <ENROLLMENT_TOKEN>
 #
 # 升级已有节点（替换 binary + 自动重启）：
-#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --upgrade
+#   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --upgrade
 #
 # 升级 master（替换 iris-master + 重启 iris-master.service）：
-#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --upgrade-master
+#   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --upgrade-master
 #
 # 卸载节点（备份 + 移除）：
-#   curl -fsSL <MASTER>/install.sh | sudo bash -s -- --uninstall
+#   curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | sudo bash -s -- --uninstall
 #
 # 可选：
 #   --binary <path>        本地二进制（跳过下载）
