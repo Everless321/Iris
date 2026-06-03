@@ -13,7 +13,7 @@
 use anyhow::{anyhow, Context, Result};
 use prost::Message;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, Endpoint, MtuDiscoveryConfig, ServerConfig, TransportConfig};
 use rustls::{ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,9 +22,25 @@ use tokio::net::UdpSocket;
 use iris_proto::control::TunnelHeader;
 
 const ALPN: &[&[u8]] = &[b"iris-quic-1"];
-const DATAGRAM_BUF: usize = 64 * 1024 * 1024;
-const IDLE_TIMEOUT_SECS: u64 = 30;
-const INITIAL_MTU: u16 = 1200;
+
+// M6 调参（2026-06-03）
+// - DATAGRAM_BUF 64MB → 16MB：单 QUIC connection 收发缓冲，64MB 太大且 forward 多时内存翻倍
+// - IDLE_TIMEOUT 30s → 120s：避免 NAT 中间设备清流导致重连
+// - KEEP_ALIVE 15s：保活心跳，比 idle_timeout 短，确保 NAT 不超时
+// - INITIAL_MTU 1200 → 1350：GCE intra-zone MTU 1460，跨太平洋 1280，取折中
+// - MTU DISCOVERY 启用：上限 1452（IPv4-safe），让 quinn 自动探测最优
+// - RECV_WINDOW 8MB：跨太平洋 RTT 100ms × 1Gbps BDP ≈ 12.5MB，给 8MB 已能跑 ~640Mbps 单流
+// - STREAM_WINDOW 同 RECV_WINDOW，单 stream 内不阻塞
+// - MAX_BIDI / MAX_UNI streams 256：高并发拨号场景
+const DATAGRAM_BUF: usize = 16 * 1024 * 1024;
+const IDLE_TIMEOUT_SECS: u64 = 120;
+const KEEP_ALIVE_SECS: u64 = 15;
+const INITIAL_MTU: u16 = 1350;
+const MTU_UPPER: u16 = 1452;
+const RECV_WINDOW: u32 = 8 * 1024 * 1024;
+const STREAM_WINDOW: u32 = 8 * 1024 * 1024;
+const MAX_BIDI_STREAMS: u32 = 256;
+const MAX_UNI_STREAMS: u32 = 256;
 const MAX_HEADER: usize = 64 * 1024;
 
 /// 在 quinn 用的 rustls config 上 patch ALPN + datagram buffer 等参数，
@@ -59,10 +75,19 @@ pub fn make_endpoints(
 }
 
 fn transport_config() -> TransportConfig {
+    let mut mtu = MtuDiscoveryConfig::default();
+    mtu.upper_bound(MTU_UPPER);
+
     let mut t = TransportConfig::default();
     t.datagram_receive_buffer_size(Some(DATAGRAM_BUF))
         .datagram_send_buffer_size(DATAGRAM_BUF)
         .initial_mtu(INITIAL_MTU)
+        .mtu_discovery_config(Some(mtu))
+        .receive_window((RECV_WINDOW as u64).try_into().expect("recv window in range"))
+        .stream_receive_window((STREAM_WINDOW as u64).try_into().expect("stream window in range"))
+        .max_concurrent_bidi_streams(MAX_BIDI_STREAMS.into())
+        .max_concurrent_uni_streams(MAX_UNI_STREAMS.into())
+        .keep_alive_interval(Some(Duration::from_secs(KEEP_ALIVE_SECS)))
         .max_idle_timeout(Some(
             Duration::from_secs(IDLE_TIMEOUT_SECS)
                 .try_into()
