@@ -52,6 +52,13 @@ struct State {
     flow_last: HashMap<String, (u64, u64)>,
     /// 每条 forward 自 agent 启动以来累计字节。单调递增，重启回 0。
     cumulative: HashMap<i64, (u64, u64)>,
+    /// agent 启动后第一次 poll 是否已完成。
+    /// 重要：节点重启时 kernel conntrack 仍保留 ESTABLISHED / TIME_WAIT 旧 flow（每条带历史字节数）。
+    /// 不做 bootstrap 的话，首次 poll 把这些 ghost flow 的整段字节当 delta 加进 cumulative，
+    /// 严重过计。第一次 poll 仅 populate flow_last 当 baseline，cumulative 不动 — 后续
+    /// poll 从这个 baseline 算增量。master delta 算法在 cumulative<last 时识别为 epoch reset，
+    /// 自然吃下"启动后看到的 delta 较小"这种情况。
+    bootstrapped: bool,
 }
 
 impl NftFastPath {
@@ -208,11 +215,18 @@ impl FastPathManager for NftFastPath {
             }
         };
         let mut st = self.state.lock().map_err(|_| anyhow!("fastpath state mutex poisoned"))?;
+        let bootstrapping = !st.bootstrapped;
         let mut new_flow_last: HashMap<String, (u64, u64)> = HashMap::with_capacity(st.flow_last.len());
         for line in text.lines() {
             let Some(entry) = parse_conntrack_line(line) else { continue };
             let Some(&fid) = st.port_to_fid.get(&entry.dport) else { continue };
             let key = entry.flow_key();
+            if bootstrapping {
+                // 首次 poll：当前 conntrack 表里的 flow 字节算 baseline，不累加 — 避免
+                // 把节点重启前的 ghost flow（TIME_WAIT 等）整段字节误计为新增。
+                new_flow_last.insert(key, (entry.orig_bytes, entry.reply_bytes));
+                continue;
+            }
             let (last_in, last_out) = st.flow_last.get(&key).copied().unwrap_or((0, 0));
             // saturating_sub：极少数情况 kernel 偶发回退（conntrack 重建）→ 报 0 增量，
             // 不报错也不双计。
@@ -224,6 +238,10 @@ impl FastPathManager for NftFastPath {
             new_flow_last.insert(key, (entry.orig_bytes, entry.reply_bytes));
         }
         st.flow_last = new_flow_last;
+        if bootstrapping {
+            st.bootstrapped = true;
+            tracing::debug!(flows = st.flow_last.len(), "fastpath bootstrap poll: baseline established");
+        }
         Ok(st.cumulative
             .iter()
             .map(|(fid, (bi, bo))| {
