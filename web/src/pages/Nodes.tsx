@@ -20,6 +20,54 @@ function HealthTag({ h }: { h: string }) {
 
 // 节点 mTLS cert 剩余天数。剩 ≤30 天节点会自动调 RenewCert RPC；
 // UI 仅展示 / 在续签失败时提示运维。
+// M4.4 节点 fast path 能力徽章。capabilities 字段是 node heartbeat 上报的 JSON。
+// 老节点 (空字符串) 视为不支持 → 灰色 — 表明 fast path 永远 fall back slow。
+function FastPathBadge({ caps }: { caps?: string }) {
+  if (!caps) {
+    return (
+      <Tooltip title="节点未上报能力（老节点 / 未升级 M4.2 binary）。该节点上所有 forward 将走 slow path。">
+        <Tag color="default" style={{ margin: 0, cursor: "help", fontSize: 11 }}>—</Tag>
+      </Tooltip>
+    );
+  }
+  let info: { fastpath: boolean; reason: string; kernel: string; in_container: boolean };
+  try {
+    info = JSON.parse(caps);
+  } catch {
+    return <Tag color="default" style={{ margin: 0, fontSize: 11 }}>解析失败</Tag>;
+  }
+  const reasonMap: Record<string, string> = {
+    "ok": "已就绪",
+    "non-linux": "非 Linux 系统",
+    "kernel-too-old": "内核版本过低 (需 ≥ 5.4)",
+    "nft-binary-missing": "缺少 nft 二进制",
+    "container-network-untrusted": "容器内 (Docker bridge / LXC)",
+    "missing-CAP_NET_ADMIN": "无 CAP_NET_ADMIN 权限",
+  };
+  // 探测 reason 不在 map → 显示原文（dry-run-failed: ...）
+  const reasonText = reasonMap[info.reason] ?? info.reason ?? "未知";
+  const tip = (
+    <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+      <div>状态：<strong>{info.fastpath ? "✓ 支持" : "✗ 不支持"}</strong></div>
+      <div>原因：{reasonText}</div>
+      {info.kernel && <div>内核：{info.kernel}</div>}
+      {info.in_container && <div style={{ color: "#faad14" }}>⚠ 容器环境</div>}
+      <div style={{ marginTop: 4, color: "#999", fontSize: 11 }}>
+        {info.fastpath
+          ? "该节点的单跳 + 非 TLS forward 可走内核 nftables DNAT（CPU ~0%）"
+          : "该节点所有 forward 永远走用户态 tokio"}
+      </div>
+    </div>
+  );
+  return (
+    <Tooltip title={tip} placement="left">
+      <Tag color={info.fastpath ? "success" : "default"} style={{ margin: 0, cursor: "help", fontSize: 11 }}>
+        {info.fastpath ? "✓ 支持" : "✗ 不支持"}
+      </Tag>
+    </Tooltip>
+  );
+}
+
 function CertExpiryBadge({ notAfter }: { notAfter?: number }) {
   if (!notAfter || notAfter <= 0) {
     return <Tag color="default" style={{ margin: 0 }}>—</Tag>;

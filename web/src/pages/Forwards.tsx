@@ -60,13 +60,13 @@ export default function Forwards() {
               </Tooltip>
             )}
             {f.path_mode === "fast" && (
-              <Tooltip title="强制内核 fast path（nftables DNAT）。失败自动回退 slow path。">
-                <Tag color="processing" style={{ marginLeft: 4, cursor: "help" }}>fast</Tag>
+              <Tooltip title="管理员配置：强制内核 fast path（nftables DNAT）。失败自动回退 slow path — 看「Listener」列实际路径。">
+                <Tag color="processing" style={{ marginLeft: 4, cursor: "help" }}>fast*</Tag>
               </Tooltip>
             )}
             {f.path_mode === "slow" && (
-              <Tooltip title="强制 slow path（用户态 tokio 转发）— 保留 session 历史 + 双向流量统计">
-                <Tag style={{ marginLeft: 4, cursor: "help" }}>slow</Tag>
+              <Tooltip title="管理员配置：强制 slow path（用户态 tokio）— 保留 session 历史 + 双向流量统计准确">
+                <Tag style={{ marginLeft: 4, cursor: "help" }}>slow*</Tag>
               </Tooltip>
             )}
           </>
@@ -218,29 +218,60 @@ function ListenerBadge({ f }: { f: Forward }) {
   const total = states.length;
   const allOk = okCount === total;
   const allFail = okCount === 0;
-  const color = allOk ? "success" : allFail ? "error" : "warning";
+  const baseColor = allOk ? "success" : allFail ? "error" : "warning";
   const label = allOk ? `运行 ${okCount}/${total}` : `${okCount}/${total} 正常`;
+
+  // M4.4 配置 vs 实际不匹配检测
+  const intent = f.path_mode ?? "auto";
+  const fastCount = states.filter((s) => s.actual_path === "fast").length;
+  const slowCount = states.filter((s) => (s.actual_path ?? "") !== "fast").length;
+  // path_mode=fast 但 有节点跑 slow（fallback 了）
+  const fastFellBack = intent === "fast" && fastCount < total;
+  // path_mode=slow 不会变 fast，不冲突
+  // path_mode=auto + 异构 = 信息性，非异常
+
   const tip = (
-    <div style={{ fontSize: 12, maxWidth: 320 }}>
-      {states.map((s) => (
-        <div key={s.node_id} style={{ marginBottom: 4 }}>
-          <Tag color={s.ok ? "success" : "error"} style={{ margin: 0, marginRight: 6, fontSize: 11 }}>
-            {s.ok ? "OK" : "FAIL"}
-          </Tag>
-          <span style={{ fontFamily: "monospace" }}>{s.node_id}</span>
-          {!s.ok && s.error && (
-            <div style={{ color: "#ff7875", marginTop: 2, fontFamily: "monospace", fontSize: 11 }}>
-              {s.error}
-            </div>
-          )}
+    <div style={{ fontSize: 12, maxWidth: 360 }}>
+      {fastFellBack && (
+        <div style={{ marginBottom: 6, padding: 4, background: "#5b2c2c", borderRadius: 4 }}>
+          <Tag color="warning" style={{ margin: 0, marginRight: 4, fontSize: 11 }}>fast 回退</Tag>
+          配置 path_mode=fast，但 {total - fastCount}/{total} 节点实际 slow
         </div>
-      ))}
+      )}
+      {states.map((s) => {
+        const ap = s.actual_path ?? "";
+        const apLabel = ap === "fast" ? "fast" : ap === "slow" ? "slow" : "?";
+        const apColor: "blue" | "default" | "warning" =
+          ap === "fast" ? "blue" : ap === "slow" ? "default" : "warning";
+        return (
+          <div key={s.node_id} style={{ marginBottom: 4 }}>
+            <Tag color={s.ok ? "success" : "error"} style={{ margin: 0, marginRight: 4, fontSize: 11 }}>
+              {s.ok ? "OK" : "FAIL"}
+            </Tag>
+            <Tag color={apColor} style={{ margin: 0, marginRight: 6, fontSize: 11 }}>
+              {apLabel}
+            </Tag>
+            <span style={{ fontFamily: "monospace" }}>{s.node_id}</span>
+            {!s.ok && s.error && (
+              <div style={{ color: "#ff7875", marginTop: 2, fontFamily: "monospace", fontSize: 11 }}>
+                {s.error}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {!fastFellBack && fastCount > 0 && slowCount > 0 && (
+        <div style={{ marginTop: 4, color: "#999", fontSize: 11 }}>
+          多入口节点能力不同 → 混合路径运行（path_mode={intent}）
+        </div>
+      )}
     </div>
   );
   return (
     <Tooltip title={tip} placement="left">
-      <Tag color={color} style={{ margin: 0, fontSize: 11, cursor: "help" }}>
-        {label}
+      <Tag color={fastFellBack ? "warning" : baseColor}
+           style={{ margin: 0, fontSize: 11, cursor: "help" }}>
+        {fastFellBack ? `⚠ ${label}` : label}
       </Tag>
     </Tooltip>
   );

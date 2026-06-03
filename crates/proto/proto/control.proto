@@ -70,6 +70,9 @@ message ListenerState {
   string protocol = 3; // tcp | udp | tcp+udp
   bool ok = 4;
   string error = 5;    // ok=false 时填错误原因 (EADDRINUSE / Permission denied 等)
+  // M4.4 实际转发路径："slow"（用户态 tokio）/ "fast"（内核 nftables DNAT）。
+  // 老节点为空字符串 — UI 视为 slow（默认行为）。
+  string actual_path = 6;
 }
 
 // 单条 forward 的流量累计（自 node 启动以来）。

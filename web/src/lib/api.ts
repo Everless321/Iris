@@ -77,6 +77,8 @@ export type ListenerNodeStatus = {
   ok: boolean;
   error: string;
   updated_at: number;
+  // M4.4 该节点对该 forward 实际选的路径
+  actual_path?: "fast" | "slow" | "";
 };
 export type Forward = {
   id: number;

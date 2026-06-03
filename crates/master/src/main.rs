@@ -107,6 +107,8 @@ pub struct ListenerStateEntry {
     pub port: u32,
     pub protocol: String,
     pub updated_at: i64,
+    /// M4.4：节点对该 forward 实际选的路径。""（老节点）/"slow"/"fast"。
+    pub actual_path: String,
 }
 
 /// 跟踪每 (node_id, forward_id) 上次心跳上报的 traffic 累计值。
@@ -484,6 +486,7 @@ impl Control for ControlSvc {
                         port: s.port,
                         protocol: s.protocol.clone(),
                         updated_at: now,
+                        actual_path: s.actual_path.clone(),
                     },
                 );
             }

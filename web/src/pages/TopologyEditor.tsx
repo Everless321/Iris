@@ -796,6 +796,10 @@ export default function TopologyEditor() {
           readOnly={readOnly}
           protocols={protocols}
           snapshot={forwardSnapshot}
+          hops={hops}
+          targets={targets}
+          allNodes={allNodes}
+          form={form}
         />
       </Form>
 
@@ -1289,15 +1293,22 @@ function QuotaSection({
 // 'tls'（默认）= 节点间走 mTLS；'plain' = 节点间 TCP 不裹 TLS（同机房 / 内网信任）。
 // UDP 链路受 QUIC 协议层强制 TLS，选 plain 仅对 TCP 生效，UI 给提示。
 function LinkEncryptionSection({
-  isAdmin, readOnly, protocols, snapshot,
+  isAdmin, readOnly, protocols, snapshot, hops, targets, allNodes, form,
 }: {
   isAdmin: boolean;
   readOnly: boolean;
   protocols: string[];
   snapshot: Forward | null;
+  hops: Hop[];
+  targets: TargetEndpoint[];
+  allNodes: ZNode[];
+  form: any;
 }) {
   const hasUdp = protocols.includes("udp");
   const current = snapshot?.link_encryption ?? "tls";
+  // M4.4 实时跟踪表单变化（path_mode / link_encryption）
+  const watchedPath = (Form.useWatch as any)("path_mode", form) ?? "auto";
+  const watchedEnc = (Form.useWatch as any)("link_encryption", form) ?? "tls";
   return (
     <Card title="链路加密（节点之间）" size="small" style={{ marginBottom: 32 }}>
       {!isAdmin && (
@@ -1351,14 +1362,134 @@ function LinkEncryptionSection({
           style={{ maxWidth: 480 }}
         />
       </Form.Item>
-      <Alert
-        type="info"
-        showIcon
-        message="fast path 限制"
-        description="只对单跳 + 单 target + 非 TLS 加密的 TCP/UDP 生效；多跳 / 多 target / TLS 永远 slow。fast 模式下 #36 单连接会话历史不可用（kernel netfilter 不跟踪 conn lifecycle）；流量统计 M4.3 后已支持双向准计（用 conntrack-acct 而非 nft counter）。"
-        style={{ marginTop: 8 }}
+      <FastPathPrediction
+        hops={hops}
+        targets={targets}
+        protocols={protocols}
+        pathMode={watchedPath}
+        linkEncryption={watchedEnc}
+        allNodes={allNodes}
       />
     </Card>
+  );
+}
+
+// ── M4.4 fast path 实时预测：根据当前配置 + 入口节点能力，告诉用户实际会走哪条路径
+function FastPathPrediction({
+  hops, targets, protocols, pathMode, linkEncryption, allNodes,
+}: {
+  hops: Hop[];
+  targets: TargetEndpoint[];
+  protocols: string[];
+  pathMode: string;
+  linkEncryption: string;
+  allNodes: ZNode[];
+}) {
+  // 入口节点 = hops[0].nodes
+  const entryIds = hops[0]?.nodes.map((n) => n.id) ?? [];
+  const entryNodes = entryIds.map((id) => allNodes.find((n) => n.id === id)).filter(Boolean) as ZNode[];
+
+  // 解析 capabilities — 哪些入口节点支持 fastpath
+  const nodeFastSupport = entryNodes.map((n) => {
+    if (!n.capabilities) return { id: n.id, supports: false, reason: "未上报" };
+    try {
+      const c = JSON.parse(n.capabilities);
+      return { id: n.id, supports: !!c.fastpath, reason: c.reason || "" };
+    } catch {
+      return { id: n.id, supports: false, reason: "解析失败" };
+    }
+  });
+
+  // qualifies_for_fastpath 镜像 (与 crates/node/src/main.rs::qualifies_for_fastpath 同步)
+  const isSingleHop = hops.length === 1;
+  const isSingleTarget = targets.length === 1;
+  const proto = protocols.length === 1 ? protocols[0] : "";
+  const isSupportedProto = proto === "tcp" || proto === "udp";
+
+  // 三大硬约束
+  if (!isSingleHop) {
+    return (
+      <Alert type="info" showIcon style={{ marginTop: 8 }}
+        message="路径预测：slow path (用户态 tokio raw_tunnel)"
+        description={`多跳 (${hops.length} hops) 不支持 fast path — 节点间需 TLS / 自定义 framing，kernel 无法终结。`} />
+    );
+  }
+  if (!isSingleTarget) {
+    return (
+      <Alert type="info" showIcon style={{ marginTop: 8 }}
+        message="路径预测：slow path"
+        description={`多 target (${targets.length}) 不支持 fast path — kernel DNAT 仅一对一。`} />
+    );
+  }
+  if (!isSupportedProto) {
+    return (
+      <Alert type="info" showIcon style={{ marginTop: 8 }}
+        message="路径预测：slow path"
+        description={`协议 "${protocols.join("+")}" 不支持 fast path — V1 仅 tcp / udp 单协议。`} />
+    );
+  }
+  if (pathMode === "slow") {
+    return (
+      <Alert type="info" showIcon style={{ marginTop: 8 }}
+        message="路径预测：slow path（管理员强制）"
+        description="path_mode=slow → 强制用户态。保留 session 历史 + 双向流量准计。" />
+    );
+  }
+  // auto 模式额外要求 plain
+  if (pathMode === "auto" && linkEncryption === "tls") {
+    return (
+      <Alert type="info" showIcon style={{ marginTop: 8 }}
+        message="路径预测：slow path"
+        description="path_mode=auto 仅在 link_encryption=plain 时启用 fast — 当前 tls 走 slow。需要 fast 请显式选 path_mode=fast。" />
+    );
+  }
+
+  // 到这里：单跳 + 单 target + tcp/udp + (fast 或 auto+plain) — 看入口节点能力
+  if (entryNodes.length === 0) {
+    return (
+      <Alert type="warning" showIcon style={{ marginTop: 8 }}
+        message="未选入口节点"
+        description="选好入口节点后才能确定实际路径。" />
+    );
+  }
+  const supportNodes = nodeFastSupport.filter((n) => n.supports);
+  const unsupportNodes = nodeFastSupport.filter((n) => !n.supports);
+
+  if (supportNodes.length === entryNodes.length) {
+    return (
+      <Alert type="success" showIcon style={{ marginTop: 8 }}
+        message={`路径预测：fast path（${entryNodes.length} 个入口节点全部支持）`}
+        description={`内核 nftables DNAT — iris-node CPU ≈ 0%，吞吐接近 NIC 极限。流量统计走 conntrack-acct（双向准 ~0.5% 偏差），单连接 session 历史不录。`} />
+    );
+  }
+  if (supportNodes.length === 0) {
+    return (
+      <Alert type="warning" showIcon style={{ marginTop: 8 }}
+        message="路径预测：所有入口节点都将回退 slow path"
+        description={
+          <div>
+            <div>所选入口节点无 fast path 能力：</div>
+            <ul style={{ margin: "4px 0 0 0", paddingLeft: 18 }}>
+              {unsupportNodes.map((n) => (
+                <li key={n.id}><Text code>{n.id}</Text> — {n.reason || "未上报"}</li>
+              ))}
+            </ul>
+            <div style={{ marginTop: 4, color: "#999" }}>升级节点到 M4.2+ binary 并确保内核 ≥ 5.4 + nft + CAP_NET_ADMIN。</div>
+          </div>
+        } />
+    );
+  }
+  // 混合
+  return (
+    <Alert type="warning" showIcon style={{ marginTop: 8 }}
+      message="路径预测：混合（部分 fast / 部分 slow）"
+      description={
+        <div>
+          <div>支持 fast：{supportNodes.map((n) => <Tag key={n.id} color="success" style={{ marginRight: 4 }}>{n.id}</Tag>)}</div>
+          <div style={{ marginTop: 4 }}>fallback slow：{unsupportNodes.map((n) => <Tag key={n.id} color="default" style={{ marginRight: 4 }}>{n.id}</Tag>)}</div>
+          <div style={{ marginTop: 4, color: "#999" }}>不同入口节点会用不同路径，可在 Forward 列表 Listener 列看实际状态。</div>
+        </div>
+      } />
   );
 }
 

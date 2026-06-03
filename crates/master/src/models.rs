@@ -214,6 +214,10 @@ pub struct ListenerNodeStatus {
     pub ok: bool,
     pub error: String,
     pub updated_at: i64,
+    /// M4.4 该节点对该 forward 实际选的路径。"fast"（内核 nftables DNAT）/
+    /// "slow"（用户态 tokio）/ ""（老节点未上报，视为 slow）。
+    #[serde(default)]
+    pub actual_path: String,
 }
 
 impl From<ForwardRow> for Forward {

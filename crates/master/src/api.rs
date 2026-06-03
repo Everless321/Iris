@@ -295,6 +295,7 @@ async fn list_forwards(claims: Claims, State(s): State<AppState>) -> Result<Json
                     ok: st.ok,
                     error: st.error.clone(),
                     updated_at: st.updated_at,
+                    actual_path: st.actual_path.clone(),
                 });
             }
         }
