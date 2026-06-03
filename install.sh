@@ -180,6 +180,17 @@ download_binary() {
   chmod 755 "$target"
 }
 
+# ---- kernel tuning (M5.0 conservative): 3 safe sysctls，全节点通用零副作用 ----
+write_sysctl_drop_in() {
+  cat > /etc/sysctl.d/99-iris.conf <<'SYSCTL'
+# Iris node kernel tuning — conservative, 全节点通用
+# 解决 fast path 高并发短连接 backlog 溢出（实测 5000 并发成功率 56% → 应 ~100%）
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 8192
+SYSCTL
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-iris.conf >/dev/null 2>&1 || true
+}
+
 # ---- systemd unit writer ----
 write_systemd_unit() {
   local node_id="$1"
@@ -198,7 +209,7 @@ WorkingDirectory=$INSTALL_DIR
 # cert 续签时节点 std::process::exit(0)，依赖 Restart=always 把它拉起来
 Restart=always
 RestartSec=3
-LimitNOFILE=65535
+LimitNOFILE=1048576
 StandardOutput=journal
 StandardError=journal
 
@@ -303,7 +314,9 @@ EOF
   chmod 600 "$INSTALL_DIR/.env"
 
   if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
-    info "安装 systemd 服务 iris-node.service"
+    info "应用内核调参 /etc/sysctl.d/99-iris.conf (somaxconn, tcp_max_syn_backlog)"
+    write_sysctl_drop_in
+    info "安装 systemd 服务 iris-node.service (LimitNOFILE=1048576)"
     write_systemd_unit "$node_id"
     systemctl enable --now iris-node.service
     sleep 2
@@ -332,6 +345,16 @@ do_upgrade() {
 
   download_binary "$INSTALL_DIR/iris-node.new"
   mv "$INSTALL_DIR/iris-node.new" "$INSTALL_DIR/iris-node"
+
+  # M5.0: 升级时一并刷新内核调参 + systemd unit（旧机器需要拿到新 LimitNOFILE / sysctl）
+  if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
+    info "刷新内核调参 + systemd unit (M5.0)"
+    write_sysctl_drop_in
+    # 保留旧 node_id：从现有 unit 文件抽
+    local cur_id
+    cur_id=$(awk -F'[()]' '/^Description=Iris Node/ {print $2; exit}' /etc/systemd/system/iris-node.service 2>/dev/null)
+    [ -n "$cur_id" ] && write_systemd_unit "$cur_id"
+  fi
 
   if command -v systemctl >/dev/null && systemctl is-active --quiet iris-node.service; then
     info "systemctl restart iris-node.service"
