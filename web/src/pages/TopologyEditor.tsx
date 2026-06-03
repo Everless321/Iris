@@ -1355,7 +1355,7 @@ function LinkEncryptionSection({
         type="info"
         showIcon
         message="fast path 限制"
-        description="只对单跳 + 单 target + 非 TLS 加密的 TCP/UDP 生效；多跳 / 多 target / TLS 永远 slow。fast 模式下 #36 会话历史不可用、流量统计仅入向（出向 V2）。"
+        description="只对单跳 + 单 target + 非 TLS 加密的 TCP/UDP 生效；多跳 / 多 target / TLS 永远 slow。fast 模式下 #36 单连接会话历史不可用（kernel netfilter 不跟踪 conn lifecycle）；流量统计 M4.3 后已支持双向准计（用 conntrack-acct 而非 nft counter）。"
         style={{ marginTop: 8 }}
       />
     </Card>

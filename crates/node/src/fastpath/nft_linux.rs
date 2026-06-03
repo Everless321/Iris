@@ -9,28 +9,53 @@
 //!   }
 //!
 //! 每条 forward 规则:
-//!   add rule inet iris prerouting <tcp|udp> dport <P> counter dnat to <IP>:<PORT> \
+//!   add rule inet iris prerouting <tcp|udp> dport <P> counter dnat ip to <IP>:<PORT> \
 //!     comment "iris-fwd-<ID>"
 //!
 //! 删除：list -a 拿 handle，delete by handle。
-//! 拉计数器：nft -j list table inet iris，解 JSON 找 comment 匹配的 rule.counter。
+//!
+//! 流量统计（M4.3）：
+//!   nft prerouting counter 仅命中 conntrack 未建状态的首包 — 准确度 < 0.01%。
+//!   改用 `/proc/net/nf_conntrack` (要求 sysctl `net.netfilter.nf_conntrack_acct=1`)，
+//!   每条 entry 双向 bytes/packets 都准确，按 original-dport == listen_port 归属 forward。
+//!
+//!   节点端做 delta tracking：上次 tick 见过的 5-tuple flow 记录 last_seen 字节数，
+//!   本 tick 见到同 flow 加增量。flow 结束（不再出现在 /proc）→ 从 last_seen 丢，
+//!   累计 bytes 留在 cumulative。cumulative 单调递增（agent 重启回 0，master 端
+//!   delta 算法识别为 epoch 重置）。
 
 use super::{CounterSnapshot, FastPathManager, FastPathRule};
 use anyhow::{anyhow, Result};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 const TABLE: &str = "iris";
+const CONNTRACK_PATH: &str = "/proc/net/nf_conntrack";
+const CONNTRACK_ACCT_SYSCTL: &str = "/proc/sys/net/netfilter/nf_conntrack_acct";
 
 #[derive(Default)]
 pub struct NftFastPath {
     initialized: std::sync::atomic::AtomicBool,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    /// listen_port → forward_id。add/delete_rule 时更新；get_counters 时按
+    /// conntrack entry original-dport 反查 forward_id。
+    port_to_fid: HashMap<u16, i64>,
+    /// 上次 tick 每条 flow 见到的 (original_bytes, reply_bytes)。
+    /// key = "proto:src_ip:sport:dport" 唯一标识连接。
+    /// flow 关闭（不再出现）→ 自动从 map 丢弃。
+    flow_last: HashMap<String, (u64, u64)>,
+    /// 每条 forward 自 agent 启动以来累计字节。单调递增，重启回 0。
+    cumulative: HashMap<i64, (u64, u64)>,
 }
 
 impl NftFastPath {
-    /// 用 stdin 跑 `nft -f -` 提交一个事务。返回 stderr 文本（成功为空）。
+    /// 用 stdin 跑 `nft -f -` 提交一个事务。
     fn nft_exec(input: &str) -> Result<()> {
         let mut child = Command::new("nft")
             .arg("-f")
@@ -61,7 +86,6 @@ impl NftFastPath {
             .output()
             .map_err(|e| anyhow!("spawn nft list: {e}"))?;
         if !out.status.success() {
-            // 表不存在等情形 → 无规则可删
             return Ok(Vec::new());
         }
         let text = String::from_utf8_lossy(&out.stdout);
@@ -69,7 +93,6 @@ impl NftFastPath {
         let mut handles = Vec::new();
         for line in text.lines() {
             if line.contains(&needle) {
-                // 形如: ... comment "iris-fwd-42" # handle 7
                 if let Some(h) = line.rsplit("# handle ").next() {
                     if let Ok(num) = h.trim().parse::<u64>() {
                         handles.push(num);
@@ -84,18 +107,25 @@ impl NftFastPath {
 impl FastPathManager for NftFastPath {
     fn init(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
-        // DNAT 把包送到外部目标必须 ip_forward=1，否则 kernel 不会路由出去。
-        // Ubuntu/Debian 默认是 0（仅做客户端使用）— 静默启用，失败仅 warn 不阻塞。
-        // 不写 /etc/sysctl.d 是有意：fast path 是 iris 运行时行为，agent 死了应该自动失效。
-        for sysctl_path in ["/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv4/conf/all/forwarding"] {
+        // DNAT 把包送到外部目标必须 ip_forward=1，否则 kernel 不路由出去。
+        // Ubuntu/Debian 默认是 0（仅做客户端使用）— 静默启用。
+        for sysctl_path in [
+            "/proc/sys/net/ipv4/ip_forward",
+            "/proc/sys/net/ipv4/conf/all/forwarding",
+        ] {
             if let Err(e) = std::fs::write(sysctl_path, "1\n") {
                 tracing::warn!(path = %sysctl_path, error = %e, "enable ip_forward failed (DNAT may not route)");
             }
         }
-        // 先清旧残留（上一次 agent crash 留的），失败忽略
+        // M4.3 conntrack-acct：开启 kernel 在每条 conntrack entry 上记录 packets/bytes。
+        // 默认在大多数现代发行版（Ubuntu 22.04+）= 1，但保守显式启用。失败仅 warn —
+        // 失败时 /proc/net/nf_conntrack 的 bytes= 字段会一直是 0，fast forward 流量统计将报 0。
+        if let Err(e) = std::fs::write(CONNTRACK_ACCT_SYSCTL, "1\n") {
+            tracing::warn!(path = CONNTRACK_ACCT_SYSCTL, error = %e,
+                "enable nf_conntrack_acct failed (fast path traffic stats will be 0)");
+        }
+        // 先清旧残留
         let _ = Self::nft_exec(&format!("delete table inet {TABLE}"));
-        // 新建表 + 两条 nat chain；postrouting 默认 masquerade
-        // priority: dstnat=-100, srcnat=100（kernel 默认值，nft 关键字自动展开）
         let script = format!(
             "table inet {TABLE} {{\n\
              \tchain prerouting {{ type nat hook prerouting priority dstnat; }}\n\
@@ -113,6 +143,11 @@ impl FastPathManager for NftFastPath {
         use std::sync::atomic::Ordering;
         let _ = Self::nft_exec(&format!("delete table inet {TABLE}"));
         self.initialized.store(false, Ordering::Release);
+        if let Ok(mut st) = self.state.lock() {
+            st.port_to_fid.clear();
+            st.flow_last.clear();
+            st.cumulative.clear();
+        }
         Ok(())
     }
 
@@ -123,8 +158,6 @@ impl FastPathManager for NftFastPath {
         };
         let ip = rule.target_addr.ip();
         let port = rule.target_addr.port();
-        // inet 表混合 v4/v6，dnat 必须显式 ip/ip6 限定 family（否则报
-        // "ip or ip6 must be specified with address for inet tables"）。
         let (family_qual, ip_str) = match ip {
             std::net::IpAddr::V4(v4) => ("ip", v4.to_string()),
             std::net::IpAddr::V6(v6) => ("ip6", format!("[{v6}]")),
@@ -134,62 +167,246 @@ impl FastPathManager for NftFastPath {
              comment \"iris-fwd-{}\"\n",
             rule.listen_port, port, rule.forward_id
         );
-        Self::nft_exec(&script)
+        Self::nft_exec(&script)?;
+        // 注册 listen_port → forward_id 映射（M4.3 用于 conntrack 归属）
+        if let Ok(mut st) = self.state.lock() {
+            st.port_to_fid.insert(rule.listen_port, rule.forward_id);
+            // 新加 forward 预置 0 累计，让首次 heartbeat 就有 entry
+            st.cumulative.entry(rule.forward_id).or_insert((0, 0));
+        }
+        Ok(())
     }
 
     fn delete_rule(&self, forward_id: i64) -> Result<()> {
         let handles = Self::find_rule_handles(forward_id)?;
-        if handles.is_empty() {
-            return Ok(());
+        if !handles.is_empty() {
+            let mut script = String::new();
+            for h in handles {
+                script.push_str(&format!(
+                    "delete rule inet {TABLE} prerouting handle {h}\n"
+                ));
+            }
+            Self::nft_exec(&script)?;
         }
-        // 多个 handle 一起删（同 forward_id 可能有多条 — 防御性处理）
-        let mut script = String::new();
-        for h in handles {
-            script.push_str(&format!(
-                "delete rule inet {TABLE} prerouting handle {h}\n"
-            ));
+        // 清状态：port_to_fid 反查删，cumulative 整条删（forward 没了）。
+        // flow_last 不主动清 — 其中残留的 flow 自然会在下次 poll 时因为 port_to_fid
+        // 找不到 fid 而忽略，下下次 poll 干脆不出现就被 swap 掉。
+        if let Ok(mut st) = self.state.lock() {
+            st.port_to_fid.retain(|_, fid| *fid != forward_id);
+            st.cumulative.remove(&forward_id);
         }
-        Self::nft_exec(&script)
+        Ok(())
     }
 
     fn get_counters(&self) -> Result<HashMap<i64, CounterSnapshot>> {
-        let out = Command::new("nft")
-            .args(["-j", "list", "table", "inet", TABLE])
-            .output()
-            .map_err(|e| anyhow!("spawn nft -j list: {e}"))?;
-        if !out.status.success() {
-            return Ok(HashMap::new());
-        }
-        let v: Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| anyhow!("parse nft json: {e}"))?;
-        let mut map: HashMap<i64, CounterSnapshot> = HashMap::new();
-        // nft -j 顶层：{ "nftables": [{ "metainfo": {...} }, { "table": {...} }, { "chain": {...} }, { "rule": {...} }, ...] }
-        let Some(items) = v.get("nftables").and_then(|x| x.as_array()) else {
-            return Ok(map);
-        };
-        for item in items {
-            let Some(rule) = item.get("rule") else { continue };
-            let Some(comment) = rule.get("comment").and_then(|c| c.as_str()) else { continue };
-            let Some(fid_str) = comment.strip_prefix("iris-fwd-") else { continue };
-            let Ok(fid) = fid_str.parse::<i64>() else { continue };
-            // expr 是 array of { "match": ... } / { "counter": ... } / { "dnat": ... }
-            let Some(exprs) = rule.get("expr").and_then(|e| e.as_array()) else { continue };
-            for e in exprs {
-                if let Some(c) = e.get("counter") {
-                    let bytes = c.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0);
-                    map.entry(fid).or_insert(CounterSnapshot {
-                        forward_id: fid,
-                        bytes_in: bytes,
-                        bytes_out: 0, // V2 conntrack 反向
-                    });
-                    break;
-                }
+        let text = match std::fs::read_to_string(CONNTRACK_PATH) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(path = CONNTRACK_PATH, error = %e, "read conntrack failed");
+                // 读失败 → 返回当前 cumulative 不变（state 里的）
+                return Ok(self.snapshot_cumulative());
             }
+        };
+        let mut st = self.state.lock().map_err(|_| anyhow!("fastpath state mutex poisoned"))?;
+        let mut new_flow_last: HashMap<String, (u64, u64)> = HashMap::with_capacity(st.flow_last.len());
+        for line in text.lines() {
+            let Some(entry) = parse_conntrack_line(line) else { continue };
+            let Some(&fid) = st.port_to_fid.get(&entry.dport) else { continue };
+            let key = entry.flow_key();
+            let (last_in, last_out) = st.flow_last.get(&key).copied().unwrap_or((0, 0));
+            // saturating_sub：极少数情况 kernel 偶发回退（conntrack 重建）→ 报 0 增量，
+            // 不报错也不双计。
+            let delta_in = entry.orig_bytes.saturating_sub(last_in);
+            let delta_out = entry.reply_bytes.saturating_sub(last_out);
+            let cum = st.cumulative.entry(fid).or_insert((0, 0));
+            cum.0 = cum.0.saturating_add(delta_in);
+            cum.1 = cum.1.saturating_add(delta_out);
+            new_flow_last.insert(key, (entry.orig_bytes, entry.reply_bytes));
         }
-        Ok(map)
+        st.flow_last = new_flow_last;
+        Ok(st.cumulative
+            .iter()
+            .map(|(fid, (bi, bo))| {
+                (*fid, CounterSnapshot {
+                    forward_id: *fid,
+                    bytes_in: *bi,
+                    bytes_out: *bo,
+                })
+            })
+            .collect())
     }
 
     fn is_available(&self) -> bool {
         self.initialized.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl NftFastPath {
+    fn snapshot_cumulative(&self) -> HashMap<i64, CounterSnapshot> {
+        let st = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        st.cumulative
+            .iter()
+            .map(|(fid, (bi, bo))| {
+                (*fid, CounterSnapshot {
+                    forward_id: *fid,
+                    bytes_in: *bi,
+                    bytes_out: *bo,
+                })
+            })
+            .collect()
+    }
+}
+
+// ───── conntrack 行解析 ─────────────────────────────────────────
+
+/// 一条 /proc/net/nf_conntrack 解析结果。仅 tcp/udp 才有意义。
+struct CtEntry {
+    proto: String, // "tcp" | "udp"
+    src: String,   // 原始方向 src IP（客户端 IP）
+    sport: u16,    // 原始方向 sport（客户端临时端口）
+    dport: u16,    // 原始方向 dport（= forward listen_port）
+    orig_bytes: u64,
+    reply_bytes: u64,
+}
+
+impl CtEntry {
+    fn flow_key(&self) -> String {
+        format!("{}:{}:{}:{}", self.proto, self.src, self.sport, self.dport)
+    }
+}
+
+/// 解析一行 conntrack。格式：
+///   `ipv4 2 tcp 6 119 ESTABLISHED src=A dst=B sport=C dport=D packets=P bytes=BX src=B' dst=A' sport=D' dport=C' packets=P' bytes=BY [ASSURED] ...`
+/// 第一对 src/sport/dport/packets/bytes = original direction（客户端→入口）
+/// 第二对 = reply direction（入口→客户端）
+/// 非 tcp/udp 返回 None。
+fn parse_conntrack_line(line: &str) -> Option<CtEntry> {
+    let mut proto: Option<String> = None;
+    let mut src: Option<String> = None;
+    let mut sport: Option<u16> = None;
+    let mut dport: Option<u16> = None;
+    let mut bytes_seen = 0u8;
+    let mut orig_bytes = 0u64;
+    let mut reply_bytes = 0u64;
+
+    for tok in line.split_whitespace() {
+        if (tok == "tcp" || tok == "udp") && proto.is_none() {
+            proto = Some(tok.to_string());
+        } else if let Some(v) = tok.strip_prefix("src=") {
+            if src.is_none() {
+                src = Some(v.to_string());
+            }
+        } else if let Some(v) = tok.strip_prefix("sport=") {
+            if sport.is_none() {
+                sport = v.parse().ok();
+            }
+        } else if let Some(v) = tok.strip_prefix("dport=") {
+            if dport.is_none() {
+                dport = v.parse().ok();
+            }
+        } else if let Some(v) = tok.strip_prefix("bytes=") {
+            let val: u64 = v.parse().unwrap_or(0);
+            bytes_seen += 1;
+            if bytes_seen == 1 {
+                orig_bytes = val;
+            } else if bytes_seen == 2 {
+                reply_bytes = val;
+            }
+        }
+    }
+
+    Some(CtEntry {
+        proto: proto?,
+        src: src?,
+        sport: sport?,
+        dport: dport?,
+        orig_bytes,
+        reply_bytes,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tcp_established() {
+        let line = "ipv4     2 tcp      6 431999 ESTABLISHED src=10.146.0.6 dst=104.198.114.243 sport=43210 dport=9301 packets=1234 bytes=560000 src=23.149.108.114 dst=10.146.0.4 sport=5201 dport=43210 packets=987 bytes=12340000 [ASSURED] mark=0 use=2";
+        let e = parse_conntrack_line(line).unwrap();
+        assert_eq!(e.proto, "tcp");
+        assert_eq!(e.src, "10.146.0.6");
+        assert_eq!(e.sport, 43210);
+        assert_eq!(e.dport, 9301);
+        assert_eq!(e.orig_bytes, 560000);
+        assert_eq!(e.reply_bytes, 12340000);
+        assert_eq!(e.flow_key(), "tcp:10.146.0.6:43210:9301");
+    }
+
+    #[test]
+    fn parse_udp_unreplied() {
+        let line = "ipv4 2 udp 17 28 src=10.0.0.1 dst=10.0.0.2 sport=44444 dport=53 packets=1 bytes=64 [UNREPLIED] src=10.0.0.2 dst=10.0.0.1 sport=53 dport=44444 packets=0 bytes=0 mark=0 use=2";
+        let e = parse_conntrack_line(line).unwrap();
+        assert_eq!(e.proto, "udp");
+        assert_eq!(e.dport, 53);
+        assert_eq!(e.orig_bytes, 64);
+        assert_eq!(e.reply_bytes, 0);
+    }
+
+    #[test]
+    fn parse_icmp_skipped() {
+        let line = "ipv4 2 icmp 1 29 src=1.2.3.4 dst=5.6.7.8 type=8 code=0 id=1234 packets=1 bytes=84 src=5.6.7.8 dst=1.2.3.4 type=0 code=0 id=1234 packets=1 bytes=84 mark=0 use=1";
+        // icmp 没 sport/dport 关键字 → 解析失败 None
+        assert!(parse_conntrack_line(line).is_none());
+    }
+
+    #[test]
+    fn parse_invalid_returns_none() {
+        assert!(parse_conntrack_line("").is_none());
+        assert!(parse_conntrack_line("garbage line without keywords").is_none());
+    }
+
+    /// 模拟两次 poll 的 delta 累加。
+    #[test]
+    fn delta_tracking_simulates_correctly() {
+        let fp = NftFastPath::default();
+        fp.state.lock().unwrap().port_to_fid.insert(9301, 47);
+
+        // 模拟首次 poll：flow A 已传 1000/2000
+        {
+            let mut st = fp.state.lock().unwrap();
+            let key = "tcp:10.0.0.1:1234:9301".to_string();
+            let (last_in, last_out) = (0, 0);
+            let entry_orig = 1000u64;
+            let entry_reply = 2000u64;
+            let delta_in = entry_orig.saturating_sub(last_in);
+            let delta_out = entry_reply.saturating_sub(last_out);
+            let cum = st.cumulative.entry(47).or_insert((0, 0));
+            cum.0 += delta_in;
+            cum.1 += delta_out;
+            st.flow_last.insert(key, (entry_orig, entry_reply));
+        }
+
+        // 第二次 poll：flow A 涨到 1500/3000
+        {
+            let mut st = fp.state.lock().unwrap();
+            let key = "tcp:10.0.0.1:1234:9301".to_string();
+            let (last_in, last_out) = st.flow_last.get(&key).copied().unwrap();
+            let entry_orig = 1500u64;
+            let entry_reply = 3000u64;
+            let delta_in = entry_orig.saturating_sub(last_in);
+            let delta_out = entry_reply.saturating_sub(last_out);
+            let cum = st.cumulative.entry(47).or_insert((0, 0));
+            cum.0 += delta_in;
+            cum.1 += delta_out;
+            st.flow_last.insert(key, (entry_orig, entry_reply));
+        }
+
+        let st = fp.state.lock().unwrap();
+        let (bi, bo) = st.cumulative[&47];
+        assert_eq!(bi, 1500); // 1000 + 500
+        assert_eq!(bo, 3000); // 2000 + 1000
     }
 }
