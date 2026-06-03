@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   Card, Form, Input, InputNumber, Select, Button, Space, Typography,
-  App, Tag, Drawer, Popconfirm, Empty, Checkbox, Alert, Progress,
+  App, Tag, Drawer, Popconfirm, Empty, Checkbox, Alert, Progress, Collapse,
 } from "antd";
+import { SettingOutlined } from "@ant-design/icons";
 import {
   ArrowLeftOutlined, SaveOutlined, PlusOutlined, CloseOutlined,
   DeleteOutlined, ThunderboltFilled, SwapOutlined, AimOutlined,
@@ -748,6 +749,47 @@ export default function TopologyEditor() {
           <Text type="secondary" style={{ fontSize: 11, marginTop: 8, display: "block" }}>
             目标地址在拓扑右侧的「TARGET」节点里编辑（支持多目标 + LB 策略）
           </Text>
+
+          {/* M4.4 折叠的高级设置：流量限制 + 链路加密 + 路径模式（admin-only 字段，普通用户折叠看 read-only） */}
+          <Collapse
+            ghost
+            style={{ marginTop: 12 }}
+            items={[
+              {
+                key: "advanced",
+                label: (
+                  <Space size={6}>
+                    <SettingOutlined />
+                    <Text strong>高级设置</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      流量配额 / 速率限制 / 节点间加密 / 转发路径
+                    </Text>
+                  </Space>
+                ),
+                children: (
+                  <div>
+                    <QuotaSection
+                      isAdmin={isAdmin}
+                      readOnly={readOnly}
+                      snapshot={forwardSnapshot}
+                      embedded
+                    />
+                    <LinkEncryptionSection
+                      isAdmin={isAdmin}
+                      readOnly={readOnly}
+                      protocols={protocols}
+                      snapshot={forwardSnapshot}
+                      hops={hops}
+                      targets={targets}
+                      allNodes={allNodes}
+                      form={form}
+                      embedded
+                    />
+                  </div>
+                ),
+              },
+            ]}
+          />
         </Card>
 
         <Card
@@ -785,22 +827,6 @@ export default function TopologyEditor() {
           </div>
         </Card>
 
-        <QuotaSection
-          isAdmin={isAdmin}
-          readOnly={readOnly}
-          snapshot={forwardSnapshot}
-        />
-
-        <LinkEncryptionSection
-          isAdmin={isAdmin}
-          readOnly={readOnly}
-          protocols={protocols}
-          snapshot={forwardSnapshot}
-          hops={hops}
-          targets={targets}
-          allNodes={allNodes}
-          form={form}
-        />
       </Form>
 
       {/* 配置抽屉 */}
@@ -1154,19 +1180,26 @@ function HopConfigPanel(props: {
 // admin: 表单输入；customer: 仅显示当前状态（已用 / 上限 / 重置倒计时 / 触达状态）。
 // 单位约定：UI 用 GB / MB·s⁻¹，发送时由 save() 换成 bytes / bytes·s⁻¹。
 function QuotaSection({
-  isAdmin, readOnly, snapshot,
+  isAdmin, readOnly, snapshot, embedded = false,
 }: {
   isAdmin: boolean;
   readOnly: boolean;
   snapshot: Forward | null;
+  embedded?: boolean;
 }) {
   const exhausted = snapshot?.quota_exhausted_at_ms != null;
   return (
     <Card
-      title="流量限制（可选）"
+      title={embedded ? null : "流量限制（可选）"}
+      type={embedded ? "inner" : undefined}
       size="small"
-      style={{ marginBottom: 32 }}
+      style={{ marginBottom: embedded ? 16 : 32 }}
     >
+      {embedded && (
+        <Text strong style={{ display: "block", marginBottom: 12, color: "#5a6878" }}>
+          流量限制（可选）
+        </Text>
+      )}
       {!isAdmin && (
         <Alert
           type="info"
@@ -1293,7 +1326,7 @@ function QuotaSection({
 // 'tls'（默认）= 节点间走 mTLS；'plain' = 节点间 TCP 不裹 TLS（同机房 / 内网信任）。
 // UDP 链路受 QUIC 协议层强制 TLS，选 plain 仅对 TCP 生效，UI 给提示。
 function LinkEncryptionSection({
-  isAdmin, readOnly, protocols, snapshot, hops, targets, allNodes, form,
+  isAdmin, readOnly, protocols, snapshot, hops, targets, allNodes, form, embedded = false,
 }: {
   isAdmin: boolean;
   readOnly: boolean;
@@ -1303,6 +1336,7 @@ function LinkEncryptionSection({
   targets: TargetEndpoint[];
   allNodes: ZNode[];
   form: any;
+  embedded?: boolean;
 }) {
   const hasUdp = protocols.includes("udp");
   const current = snapshot?.link_encryption ?? "tls";
@@ -1310,7 +1344,19 @@ function LinkEncryptionSection({
   const watchedPath = (Form.useWatch as any)("path_mode", form) ?? "auto";
   const watchedEnc = (Form.useWatch as any)("link_encryption", form) ?? "tls";
   return (
-    <Card title="链路加密（节点之间）" size="small" style={{ marginBottom: 32 }}>
+    <Card
+      title={embedded ? null : "链路加密（节点之间）"}
+      type={embedded ? "inner" : undefined}
+      size="small"
+      style={{ marginBottom: embedded ? 0 : 32 }}
+    >
+      {embedded && (
+        <Text strong style={{ display: "block", marginBottom: 12, color: "#5a6878" }}>
+          链路加密 + 转发路径
+        </Text>
+      )}
+      {/* 占位包装 — 兼容旧的 fragment 结构 */}
+      <div style={{ display: "none" }} />
       {!isAdmin && (
         <Alert
           type="info"
