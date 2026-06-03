@@ -232,10 +232,14 @@ impl FastPathManager for NftFastPath {
             // 不报错也不双计。
             let delta_in = entry.orig_bytes.saturating_sub(last_in);
             let delta_out = entry.reply_bytes.saturating_sub(last_out);
-            let cum = st.cumulative.entry(fid).or_insert((0, 0));
-            cum.0 = cum.0.saturating_add(delta_in);
-            cum.1 = cum.1.saturating_add(delta_out);
-            new_flow_last.insert(key, (entry.orig_bytes, entry.reply_bytes));
+            // M-3（review fix）：get_mut 替代 entry().or_insert() — 明确"forward 已被
+            // delete_rule 清掉 → 不重新建 entry"。port_to_fid 已是一道防线，但 get_mut
+            // 显式拒绝 ghost fid，意图更清晰也少一份隐式契约。
+            if let Some(cum) = st.cumulative.get_mut(&fid) {
+                cum.0 = cum.0.saturating_add(delta_in);
+                cum.1 = cum.1.saturating_add(delta_out);
+                new_flow_last.insert(key, (entry.orig_bytes, entry.reply_bytes));
+            }
         }
         st.flow_last = new_flow_last;
         if bootstrapping {
@@ -327,7 +331,9 @@ fn parse_conntrack_line(line: &str) -> Option<CtEntry> {
             }
         } else if let Some(v) = tok.strip_prefix("bytes=") {
             let val: u64 = v.parse().unwrap_or(0);
-            bytes_seen += 1;
+            // M-2（review fix）：saturating_add 防异常 conntrack 行含 >255 个 bytes= 键
+            // 时 panic / wrap（实际不会发生，但 fail-safe）
+            bytes_seen = bytes_seen.saturating_add(1);
             if bytes_seen == 1 {
                 orig_bytes = val;
             } else if bytes_seen == 2 {

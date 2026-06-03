@@ -80,6 +80,16 @@ fn qualifies_for_fastpath(
     if f.targets.len() != 1 {
         return false;
     }
+    // M-1（review fix）：link_encryption=tls 时永远不走 fast — 即使 path_mode=fast。
+    // 单跳 forward 本来就没"节点间"通道（link_encryption 是节点间字段），用户同时配
+    // 'fast' + 'tls' 在语义上矛盾：fast 是 kernel L3/L4 DNAT，不会做任何 TLS 终结，
+    // 也不会"加密"任何东西。silently 走 fast 会让用户误以为 TLS 在起作用。
+    // 兜底退 slow + warn，UI FastPathPrediction 已提示，这里是最后一道防线。
+    if f.path_mode == "fast" && f.link_encryption == "tls" {
+        tracing::warn!(forward_id = f.id,
+            "qualifies_for_fastpath: path_mode=fast + link_encryption=tls 配置矛盾 → 退 slow");
+        return false;
+    }
     match f.path_mode.as_str() {
         "slow" => false,
         "fast" => true,
