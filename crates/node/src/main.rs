@@ -713,6 +713,7 @@ async fn main() -> Result<()> {
                         if let Some(af) = active_forwards.get(fid) {
                             if af.actual_path == "fast" {
                                 af.traffic.set_in_absolute(cs.bytes_in);
+                                af.traffic.set_out_absolute(cs.bytes_out);
                             }
                         }
                     }
