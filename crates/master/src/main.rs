@@ -444,6 +444,17 @@ impl Control for ControlSvc {
                 tracing::warn!(node = %r.node_id, error = %e, "更新节点 capabilities 失败");
             }
         }
+        // M8 节点版本上报。空 = 老节点未上报，保持旧值。
+        if !r.node_version.is_empty() {
+            let now = now_ms() as i64;
+            if let Err(e) = sqlx::query(
+                "UPDATE nodes SET version=?, version_updated_at_ms=? WHERE id=?",
+            )
+            .bind(&r.node_version).bind(now).bind(&r.node_id)
+            .execute(&self.pool).await {
+                tracing::warn!(node = %r.node_id, error = %e, "更新节点 version 失败");
+            }
+        }
         // M7 资源监控持久化：latest 表 UPSERT 覆盖；history 表每 30s append 一行（按 ts_ms / 30000 取整去重）。
         if let Some(m) = r.metrics.as_ref() {
             let now = now_ms() as i64;

@@ -68,6 +68,9 @@ export type Node = {
   cert_not_after_ms?: number;
   // M4.2-A fast path 能力 JSON 字符串（节点 heartbeat 上报）。空 = 老节点不支持
   capabilities?: string;
+  // M8 节点 binary 版本 "0.1.0-<git short>"。空 = 老节点未上报
+  version?: string;
+  version_updated_at_ms?: number;
 };
 export type HopNode = { id: string; weight: number };
 export type Hop = { strategy: string; nodes: HopNode[] };

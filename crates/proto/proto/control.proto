@@ -88,6 +88,9 @@ message HeartbeatRequest {
   // 不存在 = 老节点未上报，master UI 显示 "—"。每次心跳带，master 覆盖 latest
   // 表 + append 到 history 表（30s 采样保留 24h）。
   NodeMetrics metrics = 10;
+  // M8 节点 binary 版本字符串："0.1.0-<git short hash>"。编译时注入。
+  // 空 = 老节点未上报；master UI 用于比对 latest 标识"过期"。
+  string node_version = 11;
 }
 
 // M7 节点资源指标。静态字段（cpu_name, cores, os 等）随心跳重复发送以容忍 master 重启。

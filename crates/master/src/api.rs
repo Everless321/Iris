@@ -125,6 +125,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/commands/:request_id", get(get_command))
         .route("/api/commands/stream", get(commands_stream))
         .route("/install.sh", get(install_script))
+        // M8 master 自身版本（节点 version 字段比对的"权威"参考）
+        .route("/api/version", get(master_version))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
         .route("/api/forwards/test", post(test_forward))
@@ -292,6 +294,8 @@ async fn create_node(
         fail_count: 0, probe_total: 0, probe_ok: 0, fail_events: 0, down_since: None, downtime_ms: 0,
         cert_not_after_ms: 0,
         capabilities: String::new(),
+        version: String::new(),
+        version_updated_at_ms: 0,
     }))
 }
 
@@ -1034,6 +1038,17 @@ async fn enroll_node(
 /// 安装脚本（公开端点）。脚本本体托管在 GitHub raw（主仓库 main 分支或 IRIS_INSTALL_SCRIPT_URL
 /// 覆盖），此端点仅做 302 redirect：脚本改动不再需要 rebuild master，且 master 离线也不影响新装节点。
 /// 生产强制 HTTPS 同 enroll 端点。
+/// M8 master 自报版本。UI 拿来作为"latest"参考，每个节点 version 与之比对显示
+/// "Latest"（一致）/ "Outdated"（不一致）/ "—"（节点未上报）。
+async fn master_version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": iris_common::version_string(),
+        "pkg_version": iris_common::PKG_VERSION,
+        "git_hash": iris_common::GIT_HASH,
+        "build_ts": iris_common::BUILD_TS,
+    }))
+}
+
 async fn install_script(headers: axum::http::HeaderMap) -> axum::response::Response {
     use axum::response::{IntoResponse, Redirect};
     if std::env::var("IRIS_REQUIRE_TLS").as_deref() == Ok("1") {

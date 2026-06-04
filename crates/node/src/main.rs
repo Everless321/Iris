@@ -767,6 +767,7 @@ async fn main() -> Result<()> {
                 advertised_addr: data_addr.clone(),
                 capabilities: fastpath_cap_json.clone(),
                 metrics: metrics_sample,
+                node_version: iris_common::version_string(),
             })
             .await
         {

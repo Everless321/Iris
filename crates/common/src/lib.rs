@@ -180,6 +180,20 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 编译时注入的 git short hash（8 字符）。`unknown` 表示非 git 仓库 / shallow clone。
+pub const GIT_HASH: &str = env!("IRIS_GIT_HASH");
+
+/// Cargo.toml workspace 版本号（如 "0.1.0"）。
+pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 编译时 UNIX 秒时间戳，区分同 git hash 的多次构建。
+pub const BUILD_TS: &str = env!("IRIS_BUILD_TS");
+
+/// 完整版本字符串："0.1.0-d28db4e1"。用于上报 + UI 显示。
+pub fn version_string() -> String {
+    format!("{PKG_VERSION}-{GIT_HASH}")
+}
+
 fn leaf(
     san: &[String],
     cn: &str,

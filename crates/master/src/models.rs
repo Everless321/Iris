@@ -37,6 +37,14 @@ pub struct Node {
     #[sqlx(default)]
     #[serde(default)]
     pub capabilities: String,
+    /// migration 0017 M8：节点 binary 版本 "0.1.0-d28db4e1"。空 = 老节点未上报。
+    #[sqlx(default)]
+    #[serde(default)]
+    pub version: String,
+    /// migration 0017 M8：version 字段最近更新时间。
+    #[sqlx(default)]
+    #[serde(default)]
+    pub version_updated_at_ms: i64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -71,6 +71,28 @@ function FastPathBadge({ caps }: { caps?: string }) {
   );
 }
 
+function VersionBadge({ nodeVer, masterVer }: { nodeVer?: string; masterVer: string | null }) {
+  if (!nodeVer) {
+    return <Tag color="default" style={{ margin: 0 }}>—</Tag>;
+  }
+  const short = nodeVer.split("-").pop() || nodeVer;
+  if (!masterVer) {
+    return <Tag style={{ margin: 0, fontFamily: "monospace" }}>{short}</Tag>;
+  }
+  if (nodeVer === masterVer) {
+    return (
+      <Tooltip title={nodeVer}>
+        <Tag color="success" style={{ margin: 0, fontFamily: "monospace" }}>{short} ✓</Tag>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip title={`节点 ${nodeVer} · master ${masterVer}`}>
+      <Tag color="warning" style={{ margin: 0, fontFamily: "monospace" }}>{short} ⚠</Tag>
+    </Tooltip>
+  );
+}
+
 function CertExpiryBadge({ notAfter }: { notAfter?: number }) {
   if (!notAfter || notAfter <= 0) {
     return <Tag color="default" style={{ margin: 0 }}>—</Tag>;
@@ -176,6 +198,7 @@ export default function Nodes() {
   const [busy, setBusy] = useState(false);
   const [metricsNodeId, setMetricsNodeId] = useState<string | null>(null);
   const [upgradeNodeId, setUpgradeNodeId] = useState<string | null>(null);
+  const [masterVersion, setMasterVersion] = useState<string | null>(null);
   const { message } = App.useApp();
 
   const load = () => api.get<Node[]>("/api/nodes").then(setList).catch(() => setList([]));
@@ -183,6 +206,10 @@ export default function Nodes() {
   useEffect(() => {
     load();
     const t = setInterval(load, 5000);
+    // M8 master version：拿来给 VersionBadge 比对。一次性，不变。
+    api.get<{ version: string }>("/api/version")
+      .then((v) => setMasterVersion(v.version))
+      .catch(() => setMasterVersion(null));
     return () => clearInterval(t);
   }, []);
 
@@ -241,6 +268,10 @@ export default function Nodes() {
     {
       title: "证书到期", key: "cert_expiry", width: 110,
       render: (_, n) => <CertExpiryBadge notAfter={n.cert_not_after_ms} />,
+    },
+    {
+      title: "版本", key: "version", width: 150,
+      render: (_, n) => <VersionBadge nodeVer={n.version} masterVer={masterVersion} />,
     },
     {
       title: "操作", key: "actions", width: 200, align: "right",
