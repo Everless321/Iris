@@ -470,6 +470,12 @@ fn env(key: &str, default: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // M8 升级 dry-run 用：新 binary 跑 `iris-node --version` 应 exit 0 + 打版本。
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("iris-node {}", iris_common::version_string());
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(
