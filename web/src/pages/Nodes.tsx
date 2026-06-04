@@ -251,7 +251,7 @@ export default function Nodes() {
 
   const columns: ColumnsType<Node> = [
     { title: "ID", dataIndex: "id", key: "id", width: 120, render: (id) => <Text className="num">{id}</Text> },
-    { title: "名称", dataIndex: "name", key: "name", render: (n) => <Text strong>{n}</Text> },
+    { title: "名称", dataIndex: "name", key: "name", width: 160, ellipsis: true, render: (n) => <Text strong>{n}</Text> },
     { title: "公网地址", dataIndex: "addr", key: "addr", width: 200, render: (a) => <Text className="num" type="secondary">{a}</Text> },
     { title: "健康", dataIndex: "health", key: "health", width: 100, render: (h) => <HealthTag h={h} /> },
     {
@@ -270,7 +270,7 @@ export default function Nodes() {
       render: (_, n) => <CertExpiryBadge notAfter={n.cert_not_after_ms} />,
     },
     {
-      title: "版本", key: "version", width: 150,
+      title: "版本", key: "version", width: 120,
       render: (_, n) => <VersionBadge nodeVer={n.version} masterVer={masterVersion} />,
     },
     {
@@ -329,6 +329,7 @@ export default function Nodes() {
             rowKey="id"
             dataSource={list}
             columns={columns}
+            scroll={{ x: "max-content" }}
             pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
             locale={{
               emptyText: (
