@@ -5,7 +5,9 @@
 //! table 设计：
 //!   table inet iris {
 //!     chain prerouting { type nat hook prerouting priority dstnat; ... }
-//!     chain postrouting { type nat hook postrouting priority srcnat; masquerade }
+//!     chain postrouting { type nat hook postrouting priority srcnat;
+//!                         ct status dnat masquerade }   // 只对 DNAT 包做 SNAT，
+//!                                                       // 避免影响 slow-path user-space socket
 //!   }
 //!
 //! 每条 forward 规则:
@@ -138,7 +140,7 @@ impl FastPathManager for NftFastPath {
              \tchain prerouting {{ type nat hook prerouting priority dstnat; }}\n\
              \tchain postrouting {{ type nat hook postrouting priority srcnat; }}\n\
              }}\n\
-             add rule inet {TABLE} postrouting masquerade comment \"iris-masq\"\n"
+             add rule inet {TABLE} postrouting ct status dnat masquerade comment \"iris-masq\"\n"
         );
         Self::nft_exec(&script)?;
         self.initialized.store(true, Ordering::Release);
