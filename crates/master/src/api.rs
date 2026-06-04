@@ -47,12 +47,29 @@ pub struct AppState {
     /// UI 先 POST /api/forwards/:id/sse-ticket（用 Authorization header）换 60s 一次性 ticket，
     /// 再用 ticket 开 EventSource。消费一次即从 map 移除，过期清理在每次发新 ticket 时顺手做。
     pub sse_tickets: Arc<Mutex<HashMap<String, SseTicketEntry>>>,
+    /// M7.1 节点 metrics 实时推送通道。heartbeat 收到 metrics 后 broadcast (node_id, payload)，
+    /// SSE 订阅者按 node_id 过滤后 push 给浏览器 EventSource。
+    pub metrics_tx: broadcast::Sender<MetricsBroadcast>,
+    /// M7.1 metrics SSE 单用 ticket（独立 pool 与 sessions 分离，便于审计）
+    pub metrics_sse_tickets: Arc<Mutex<HashMap<String, MetricsSseTicketEntry>>>,
 }
 
 #[derive(Clone)]
 pub struct SseTicketEntry {
     pub forward_id: i64,
     pub exp_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct MetricsSseTicketEntry {
+    pub node_id: String,
+    pub exp_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct MetricsBroadcast {
+    pub node_id: String,
+    pub payload: serde_json::Value,
 }
 
 impl FromRef<AppState> for AuthState {
@@ -80,6 +97,9 @@ pub fn router(state: AppState) -> Router {
         // M7 节点资源监控
         .route("/api/nodes/:id/metrics", get(get_node_metrics))
         .route("/api/nodes/:id/metrics/history", get(get_node_metrics_history))
+        // M7.1 实时 SSE 推送
+        .route("/api/nodes/:id/metrics/sse-ticket", post(issue_metrics_sse_ticket))
+        .route("/api/nodes/:id/metrics/stream", get(metrics_stream))
         .route("/install.sh", get(install_script))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
@@ -332,6 +352,55 @@ async fn get_node_metrics_history(
         "load1": r.4, "net_up_bps": r.5, "net_down_bps": r.6,
     })).collect();
     Ok(Json(v))
+}
+
+/// M7.1 发放 metrics SSE 单用 ticket（admin only，TTL 60s）。
+async fn issue_metrics_sse_ticket(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<SseTicketResp>, ApiErr> {
+    let ticket = Uuid::new_v4().to_string();
+    let now = now_ms();
+    let exp_ms = now + 60_000;
+    {
+        let mut g = s.metrics_sse_tickets.lock().unwrap();
+        g.retain(|_, e| e.exp_ms > now);
+        g.insert(ticket.clone(), MetricsSseTicketEntry { node_id, exp_ms });
+    }
+    Ok(Json(SseTicketResp { ticket, expires_in: 60 }))
+}
+
+/// M7.1 SSE 推送节点 metrics。每次 heartbeat 上报 broadcast 后立即送达浏览器。
+async fn metrics_stream(
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+    Query(q): Query<SseTicketQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiErr> {
+    let now = now_ms();
+    let entry = {
+        let mut g = s.metrics_sse_tickets.lock().unwrap();
+        g.remove(&q.ticket)
+    };
+    let entry = entry.ok_or((StatusCode::UNAUTHORIZED, "invalid or used ticket".into()))?;
+    if entry.exp_ms < now {
+        return Err((StatusCode::UNAUTHORIZED, "ticket expired".into()));
+    }
+    if entry.node_id != node_id {
+        return Err((StatusCode::FORBIDDEN, "ticket node mismatch".into()));
+    }
+
+    let want = node_id.clone();
+    let rx = s.metrics_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |msg| match msg {
+        Ok(b) if b.node_id == want => {
+            let data = serde_json::to_string(&b.payload).unwrap_or_default();
+            Some(Ok(Event::default().event("metrics").data(data)))
+        }
+        Ok(_) => None,
+        Err(_) => None,
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 // ---- 转发：归属权限 ----

@@ -356,6 +356,8 @@ struct ControlSvc {
     cert_dir: String,
     /// SSE 实时通知通道：heartbeat 写完 session 后 send(forward_id) 让浏览器订阅者重拉。
     sessions_tx: tokio::sync::broadcast::Sender<i64>,
+    /// M7.1 节点 metrics 实时推送通道：heartbeat 收到 metrics 后立即广播给 SSE 订阅者。
+    metrics_tx: tokio::sync::broadcast::Sender<api::MetricsBroadcast>,
     /// entry_forward_ids 的 fail-close 兜底：DB 抖动时用 cached allowlist 继续 enforce。
     allowlist_cache: AllowlistCache,
 }
@@ -484,6 +486,26 @@ impl Control for ControlSvc {
                 .bind(m.cpu_usage).bind(m.ram_used as i64).bind(m.disk_used as i64)
                 .bind(m.load1).bind(m.net_up_bps as i64).bind(m.net_down_bps as i64)
                 .execute(&self.pool).await;
+            // M7.1 实时广播 — 无订阅者时 send 返回 Err 直接丢弃（不阻塞 heartbeat）
+            let payload = serde_json::json!({
+                "node_id": r.node_id,
+                "cpu_name": m.cpu_name, "cpu_cores": m.cpu_cores, "arch": m.arch,
+                "os": m.os, "kernel": m.kernel, "virtualization": m.virtualization,
+                "cpu_usage": m.cpu_usage,
+                "ram_total": m.ram_total as i64, "ram_used": m.ram_used as i64,
+                "swap_total": m.swap_total as i64, "swap_used": m.swap_used as i64,
+                "disk_total": m.disk_total as i64, "disk_used": m.disk_used as i64,
+                "load1": m.load1, "load5": m.load5, "load15": m.load15,
+                "net_up_bps": m.net_up_bps as i64, "net_down_bps": m.net_down_bps as i64,
+                "net_total_up": m.net_total_up as i64, "net_total_down": m.net_total_down as i64,
+                "tcp_conns": m.tcp_conns as i64, "udp_conns": m.udp_conns as i64,
+                "uptime_secs": m.uptime_secs as i64, "process_count": m.process_count as i64,
+                "updated_at": now,
+            });
+            let _ = self.metrics_tx.send(api::MetricsBroadcast {
+                node_id: r.node_id.clone(),
+                payload,
+            });
         }
         if let Some(new_addr) = resolve_advertised_addr(&r.advertised_addr, peer_ip) {
             let cur: Option<(String,)> = sqlx::query_as("SELECT addr FROM nodes WHERE id=?")
@@ -880,9 +902,15 @@ async fn main() -> Result<()> {
     // SSE 通知通道：heartbeat 端 send，HTTP SSE 端 subscribe。容量 256 足够吸收
     // 4 节点突发心跳；超过时旧消息丢弃（订阅者 Lagged → 下次 send 仍能触发 refresh）。
     let (sessions_tx, _) = tokio::sync::broadcast::channel::<i64>(256);
+    // M7.1 节点资源监控实时推送：heartbeat 端写入 (node_id, metrics_json)，
+    // GET /api/nodes/:id/metrics/stream 端按 node_id 过滤后推送给前端 EventSource。
+    let (metrics_tx, _) = tokio::sync::broadcast::channel::<api::MetricsBroadcast>(512);
     // SSE 单用 ticket 池：避免 EventSource URL 上裸 JWT。POST /sse-ticket 写入,
     // GET /sessions/stream 消费 + 移除。容量天然受限于 ticket TTL (60s)。
     let sse_tickets: std::sync::Arc<std::sync::Mutex<HashMap<String, api::SseTicketEntry>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+    // M7.1 节点 metrics SSE 独立 ticket 池（不复用 sessions 的 — kind 不同便于审计）
+    let metrics_sse_tickets: std::sync::Arc<std::sync::Mutex<HashMap<String, api::MetricsSseTicketEntry>>> =
         std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     // HTTP 控制 API
@@ -902,6 +930,8 @@ async fn main() -> Result<()> {
         listener_states: listener_states.clone(),
         sessions_tx: sessions_tx.clone(),
         sse_tickets,
+        metrics_tx: metrics_tx.clone(),
+        metrics_sse_tickets,
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
@@ -929,6 +959,7 @@ async fn main() -> Result<()> {
         traffic_last,
         cert_dir: cert_dir(),
         sessions_tx,
+        metrics_tx,
         allowlist_cache: Arc::new(RwLock::new(HashMap::new())),
     };
     let addr = grpc_addr().parse()?;

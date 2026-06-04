@@ -133,30 +133,66 @@ export default function NodeMetricsModal({ nodeId, onClose }: Props) {
   useEffect(() => {
     if (!nodeId) return;
     let alive = true;
-    const fetchAll = async () => {
+    let es: EventSource | null = null;
+
+    const init = async () => {
       try {
-        const [m, h] = await Promise.all([
+        // 初始拉取：latest (兜底，若 SSE 慢) + history (一次性)
+        const [m, h, ticketResp] = await Promise.all([
           api.get<Metrics | null>(`/api/nodes/${nodeId}/metrics`),
           api.get<History[]>(`/api/nodes/${nodeId}/metrics/history?window=3600`),
+          api.post<{ ticket: string; expires_in: number }>(`/api/nodes/${nodeId}/metrics/sse-ticket`),
         ]);
         if (!alive) return;
         setLatest(m);
         setHistory(h);
+        setLoading(false);
+
+        // M7.1 SSE 实时订阅
+        es = new EventSource(
+          `/api/nodes/${nodeId}/metrics/stream?ticket=${encodeURIComponent(ticketResp.ticket)}`
+        );
+        es.addEventListener("metrics", (ev: MessageEvent) => {
+          if (!alive) return;
+          try {
+            const m: Metrics = JSON.parse(ev.data);
+            setLatest(m);
+          } catch {}
+        });
+        es.onerror = () => {
+          // 60s ticket 过期 / 网络抖动会触发；浏览器自动重连但 ticket 失效，
+          // 这里改为不重试 SSE，回退到 5s 轮询保命。
+          es?.close();
+          es = null;
+          startFallbackPoll();
+        };
       } catch {
         if (alive) {
           setLatest(null);
           setHistory([]);
+          setLoading(false);
+          startFallbackPoll();
         }
-      } finally {
-        if (alive) setLoading(false);
       }
     };
+
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    const startFallbackPoll = () => {
+      if (pollTimer || !alive) return;
+      pollTimer = setInterval(async () => {
+        try {
+          const m = await api.get<Metrics | null>(`/api/nodes/${nodeId}/metrics`);
+          if (alive) setLatest(m);
+        } catch {}
+      }, 5000);
+    };
+
     setLoading(true);
-    fetchAll();
-    const t = setInterval(fetchAll, 5000);
+    init();
     return () => {
       alive = false;
-      clearInterval(t);
+      es?.close();
+      if (pollTimer) clearInterval(pollTimer);
     };
   }, [nodeId]);
 
