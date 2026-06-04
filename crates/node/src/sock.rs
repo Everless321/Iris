@@ -2,19 +2,22 @@ use std::io;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 
-/// 4 MB socket buffer。Linux 端若 net.core.rmem_max / wmem_max 小于此值会被 cap，
-/// 部署侧应：`sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304`
+/// UDP socket 缓冲区（4 MB）。仅用于 UDP；TCP 走 Linux autotune。
+/// 部署侧 sysctl 推荐：`net.core.rmem_max=4194304 net.core.wmem_max=4194304`
 pub const SOCK_BUF: u32 = 4 * 1024 * 1024;
 
+/// 不动 SO_SNDBUF / SO_RCVBUF —— 让 Linux TCP autotune 工作。
+/// 早期代码硬设 4MB 会触发：
+///   1) 关闭 autotune（SOCK_RCVBUF_LOCK / SOCK_SNDBUF_LOCK）
+///   2) connect/listen 前 rcv_wscale 按当前 rcvbuf 计算 → 实测仅 2
+///   3) advertised window 卡在 256KB → 单流 BDP cap 在 5 Gbps（10G NIC）
+/// realm / shadowsocks-rust / pingora 都采用 autotune，对齐之。
 fn tcp_socket_for(sa: &SocketAddr) -> io::Result<TcpSocket> {
-    let s = if sa.is_ipv4() {
-        TcpSocket::new_v4()?
+    if sa.is_ipv4() {
+        TcpSocket::new_v4()
     } else {
-        TcpSocket::new_v6()?
-    };
-    let _ = s.set_send_buffer_size(SOCK_BUF);
-    let _ = s.set_recv_buffer_size(SOCK_BUF);
-    Ok(s)
+        TcpSocket::new_v6()
+    }
 }
 
 /// 调好缓冲区 + SO_REUSEADDR 的 TCP 监听
