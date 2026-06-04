@@ -127,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/install.sh", get(install_script))
         // M8 master 自身版本（节点 version 字段比对的"权威"参考）
         .route("/api/version", get(master_version))
+        // M9 公开状态首页（无需登录）：komari 风格节点状态展示
+        .route("/api/public/status", get(public_status))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
         .route("/api/forwards/test", post(test_forward))
@@ -1038,6 +1040,81 @@ async fn enroll_node(
 /// 安装脚本（公开端点）。脚本本体托管在 GitHub raw（主仓库 main 分支或 IRIS_INSTALL_SCRIPT_URL
 /// 覆盖），此端点仅做 302 redirect：脚本改动不再需要 rebuild master，且 master 离线也不影响新装节点。
 /// 生产强制 HTTPS 同 enroll 端点。
+/// M9 公开状态页：所有节点的非敏感运行状态，无 auth。
+/// 仅暴露：name / status / OS family / CPU% / RAM / disk / uptime / 当前网速 / 累计流量 / load。
+/// 不暴露：IP 地址 / cert / 会话明细 / forward 详情。
+async fn public_status(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiErr> {
+    use sqlx::Row;
+    // 节点基础：id/name/status/last_seen/version
+    let nodes: Vec<(String, String, String, Option<i64>, String)> = sqlx::query_as(
+        "SELECT id, name, status, last_seen, version FROM nodes ORDER BY id"
+    )
+    .fetch_all(&s.pool)
+    .await
+    .map_err(err)?;
+
+    // 一次查所有节点的 latest metrics，组装成 map
+    let metric_rows = sqlx::query(
+        "SELECT node_id, cpu_name, cpu_cores, arch, os, kernel, virtualization, \
+         cpu_usage, ram_total, ram_used, swap_total, swap_used, disk_total, disk_used, \
+         load1, load5, load15, net_up_bps, net_down_bps, net_total_up, net_total_down, \
+         uptime_secs, updated_at FROM node_metrics_latest"
+    )
+    .fetch_all(&s.pool)
+    .await
+    .map_err(err)?;
+    let mut metrics_map: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    for r in metric_rows {
+        let nid: String = r.get(0);
+        metrics_map.insert(nid, serde_json::json!({
+            "cpu_name": r.get::<String, _>(1),
+            "cpu_cores": r.get::<i64, _>(2),
+            "arch": r.get::<String, _>(3),
+            "os": r.get::<String, _>(4),
+            "kernel": r.get::<String, _>(5),
+            "virtualization": r.get::<String, _>(6),
+            "cpu_usage": r.get::<f64, _>(7),
+            "ram_total": r.get::<i64, _>(8),
+            "ram_used": r.get::<i64, _>(9),
+            "swap_total": r.get::<i64, _>(10),
+            "swap_used": r.get::<i64, _>(11),
+            "disk_total": r.get::<i64, _>(12),
+            "disk_used": r.get::<i64, _>(13),
+            "load1": r.get::<f64, _>(14),
+            "load5": r.get::<f64, _>(15),
+            "load15": r.get::<f64, _>(16),
+            "net_up_bps": r.get::<i64, _>(17),
+            "net_down_bps": r.get::<i64, _>(18),
+            "net_total_up": r.get::<i64, _>(19),
+            "net_total_down": r.get::<i64, _>(20),
+            "uptime_secs": r.get::<i64, _>(21),
+            "updated_at": r.get::<i64, _>(22),
+        }));
+    }
+
+    // 判定在线：last_seen 在 15 秒内（心跳是 2s 一次，15s 还没到就标 offline）
+    let now = now_ms() as i64;
+    let mut items: Vec<serde_json::Value> = Vec::with_capacity(nodes.len());
+    for (id, name, _status_col, last_seen, version) in nodes {
+        let online = last_seen.map(|t| now - t < 15_000).unwrap_or(false);
+        let m = metrics_map.remove(&id).unwrap_or(serde_json::Value::Null);
+        items.push(serde_json::json!({
+            "id": id,
+            "name": name,
+            "online": online,
+            "last_seen": last_seen,
+            "version": version,
+            "metrics": m,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({
+        "master_version": iris_common::version_string(),
+        "now": now,
+        "nodes": items,
+    })))
+}
+
 /// M8 master 自报版本。UI 拿来作为"latest"参考，每个节点 version 与之比对显示
 /// "Latest"（一致）/ "Outdated"（不一致）/ "—"（节点未上报）。
 async fn master_version() -> Json<serde_json::Value> {

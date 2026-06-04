@@ -17,7 +17,7 @@ export default function Register() {
     try {
       await register(v.username, v.password, v.invite_code);
       message.success("注册成功");
-      navigate("/", { replace: true });
+      navigate("/admin", { replace: true });
     } catch (e: any) {
       message.error(e.message || "注册失败");
     } finally {

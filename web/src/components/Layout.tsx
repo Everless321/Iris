@@ -40,15 +40,15 @@ export default function Layout() {
 
   const menuItems = useMemo<MenuProps["items"]>(() => {
     const base = [
-      { key: "/", icon: <DashboardOutlined />, label: "概览" },
-      { key: "/forwards", icon: <SwapOutlined />, label: "我的转发" },
+      { key: "/admin", icon: <DashboardOutlined />, label: "概览" },
+      { key: "/admin/forwards", icon: <SwapOutlined />, label: "我的转发" },
     ];
     if (user?.role === "admin") {
       base.push(
-        { key: "/nodes", icon: <DatabaseOutlined />, label: "节点" },
-        { key: "/users", icon: <TeamOutlined />, label: "用户" },
-        { key: "/invites", icon: <TagsOutlined />, label: "邀请码" },
-        { key: "/sla", icon: <AreaChartOutlined />, label: "SLA 看板" }
+        { key: "/admin/nodes", icon: <DatabaseOutlined />, label: "节点" },
+        { key: "/admin/users", icon: <TeamOutlined />, label: "用户" },
+        { key: "/admin/invites", icon: <TagsOutlined />, label: "邀请码" },
+        { key: "/admin/sla", icon: <AreaChartOutlined />, label: "SLA 看板" }
       );
     }
     return base;
@@ -68,7 +68,9 @@ export default function Layout() {
 
   // 选中项匹配
   const selectedKey = useMemo(() => {
-    if (loc.pathname.startsWith("/forwards")) return "/forwards";
+    if (loc.pathname.startsWith("/admin/forwards")) return "/admin/forwards";
+    // /admin 索引页（概览）单独匹配，避免被 /admin/nodes 等子路径覆盖
+    if (loc.pathname === "/admin" || loc.pathname === "/admin/") return "/admin";
     return loc.pathname;
   }, [loc.pathname]);
 

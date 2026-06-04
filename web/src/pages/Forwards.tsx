@@ -146,7 +146,7 @@ export default function Forwards() {
           <Title level={3} style={{ marginBottom: 4 }}>转发管理</Title>
           <Text type="secondary">查看、创建、编辑你的转发规则</Text>
         </div>
-        <Link to="/forwards/new">
+        <Link to="/admin/forwards/new">
           <Button type="primary" icon={<PlusOutlined />} size="large">新建转发</Button>
         </Link>
       </div>
@@ -164,7 +164,7 @@ export default function Forwards() {
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description="还没有转发"
               >
-                <Link to="/forwards/new">
+                <Link to="/admin/forwards/new">
                   <Button type="primary" icon={<PlusOutlined />}>创建第一条</Button>
                 </Link>
               </Empty>

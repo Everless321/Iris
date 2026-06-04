@@ -17,7 +17,7 @@ export default function Login() {
     try {
       await login(v.username, v.password);
       message.success("登录成功");
-      navigate("/", { replace: true });
+      navigate("/admin", { replace: true });
     } catch (e: any) {
       message.error(e.message || "登录失败");
     } finally {

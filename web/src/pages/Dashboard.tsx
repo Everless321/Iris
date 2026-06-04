@@ -41,7 +41,7 @@ export default function Dashboard() {
 
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col xs={12} md={6}>
-          <Link to="/forwards">
+          <Link to="/admin/forwards">
             <Card hoverable size="small">
               <Statistic
                 title={<Space size={6}><SwapOutlined />我的转发</Space>}
@@ -55,7 +55,7 @@ export default function Dashboard() {
         {user?.role === "admin" && (
           <>
             <Col xs={12} md={6}>
-              <Link to="/nodes">
+              <Link to="/admin/nodes">
                 <Card hoverable size="small">
                   <Statistic
                     title={<Space size={6}><DatabaseOutlined />在线节点</Space>}
@@ -68,7 +68,7 @@ export default function Dashboard() {
               </Link>
             </Col>
             <Col xs={12} md={6}>
-              <Link to="/sla">
+              <Link to="/admin/sla">
                 <Card hoverable size="small">
                   <Statistic
                     title={<Space size={6}><AreaChartOutlined />平均可用率</Space>}
@@ -82,7 +82,7 @@ export default function Dashboard() {
               </Link>
             </Col>
             <Col xs={12} md={6}>
-              <Link to="/sla">
+              <Link to="/admin/sla">
                 <Card hoverable size="small">
                   <Statistic
                     title={<Space size={6}><AlertOutlined />故障事件</Space>}
@@ -100,7 +100,7 @@ export default function Dashboard() {
       <Card
         title="最近转发"
         extra={
-          <Link to="/forwards/new">
+          <Link to="/admin/forwards/new">
             <Button type="primary" icon={<PlusOutlined />}>新建转发</Button>
           </Link>
         }
@@ -112,7 +112,7 @@ export default function Dashboard() {
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description="还没有转发"
           >
-            <Link to="/forwards/new">
+            <Link to="/admin/forwards/new">
               <Button type="primary" icon={<PlusOutlined />}>创建第一条转发</Button>
             </Link>
           </Empty>

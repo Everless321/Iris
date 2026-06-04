@@ -666,7 +666,7 @@ export default function TopologyEditor() {
       if (id) await api.put(`/api/forwards/${id}`, payload);
       else await api.post("/api/forwards", payload);
       message.success(id ? "已保存修改" : "已创建");
-      navigate("/forwards");
+      navigate("/admin/forwards");
     } catch (e: any) {
       if (e?.errorFields) return;
       message.error(e.message);
@@ -685,7 +685,7 @@ export default function TopologyEditor() {
     <div style={{ maxWidth: 1400, margin: "0 auto" }}>
       <Button
         type="link" icon={<ArrowLeftOutlined />}
-        onClick={() => navigate("/forwards")}
+        onClick={() => navigate("/admin/forwards")}
         style={{ paddingLeft: 0, marginBottom: 8 }}
       >
         返回转发列表
