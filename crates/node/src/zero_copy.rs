@@ -22,9 +22,9 @@ use crate::ratelimit::Limiter;
 /// 内核仍保留默认 64KB —— 不致命，性能略降。
 const PIPE_CAPACITY: i32 = 1024 * 1024;
 
-/// 单次 splice 搬运字节上限。256KB 平衡延迟和 syscall 次数。
-/// pipe 容量 1MB > 此值，确保 splice_in 一次不会被 pipe 写满。
-const SPLICE_CHUNK: usize = 256 * 1024;
+/// 单次 splice 搬运字节上限。realm 用 isize::MAX，让 pipe 容量自然封顶 ——
+/// 减少 syscall 次数（更少 async_io poll 切换）。kernel 实际只搬当前 pipe 剩余空间。
+const SPLICE_CHUNK: usize = isize::MAX as usize;
 
 /// 内核 pipe 对。drop 时关闭 fd。`pipe2(O_NONBLOCK | O_CLOEXEC)` 一次性设好 flag。
 struct Pipe {
@@ -95,6 +95,9 @@ where
     let src_fd = src.as_raw_fd();
     let dst_fd = dst.as_raw_fd();
 
+    // 限速器存在时才走 throttle async path —— None 时省 future state machine 开销
+    let has_rate = rate.is_some();
+
     loop {
         // 阶段 1：socket → pipe。tokio 处理 EAGAIN/READABLE 等待。
         let n = match src
@@ -119,8 +122,13 @@ where
                 Err(e) => return Err(e),
             };
             left -= m;
-            on_bytes(m);
-            crate::ratelimit::throttle(&rate, m).await;
+        }
+
+        // 统计 + 限速移到 outer iter 末尾：一次 splice_in 对应一次回调，
+        // 总字节量等价但减少 async_io drain loop 内的 await 切换开销。
+        on_bytes(n);
+        if has_rate {
+            crate::ratelimit::throttle(&rate, n).await;
         }
     }
 }
