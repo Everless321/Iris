@@ -31,9 +31,11 @@ export default function Forwards() {
       title: "名称",
       dataIndex: "name",
       key: "name",
+      width: 160,
+      ellipsis: true,
       render: (name, f) => (
         <Link to={`/forwards/${f.id}`}>
-          <Text strong>{name}</Text>
+          <Text strong ellipsis={{ tooltip: name }} style={{ maxWidth: 140 }}>{name}</Text>
         </Link>
       ),
     },

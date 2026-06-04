@@ -2,6 +2,7 @@ mod dataplane;
 mod fastpath;
 mod forward;
 mod lb;
+mod metrics;
 mod quic_tunnel;
 mod ratelimit;
 mod raw_tunnel;
@@ -714,6 +715,8 @@ async fn main() -> Result<()> {
     // 同时刷新节点视图 + 同步 forward listener 状态。
     let mut seq = 0u64;
     let mut tick = tokio::time::interval(Duration::from_secs(2));
+    // M7 资源采样器（CPU/RAM/disk/load/network/uptime）。每次心跳调 sample()。
+    let metrics_collector = std::sync::Arc::new(metrics::MetricsCollector::new());
     loop {
         tick.tick().await;
         seq += 1;
@@ -736,6 +739,7 @@ async fn main() -> Result<()> {
         }
         let listener_states = collect_listener_states(&active_forwards);
         let traffic_stats = collect_traffic_stats(&active_forwards);
+        let metrics_sample = Some(metrics_collector.sample());
         if let Err(e) = client
             .heartbeat(HeartbeatRequest {
                 node_id: node_id.clone(),
@@ -747,6 +751,7 @@ async fn main() -> Result<()> {
                 session_events: session_table.snapshot_and_gc(),
                 advertised_addr: data_addr.clone(),
                 capabilities: fastpath_cap_json.clone(),
+                metrics: metrics_sample,
             })
             .await
         {

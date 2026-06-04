@@ -434,6 +434,57 @@ impl Control for ControlSvc {
                 tracing::warn!(node = %r.node_id, error = %e, "更新节点 capabilities 失败");
             }
         }
+        // M7 资源监控持久化：latest 表 UPSERT 覆盖；history 表每 30s append 一行（按 ts_ms / 30000 取整去重）。
+        if let Some(m) = r.metrics.as_ref() {
+            let now = now_ms() as i64;
+            if let Err(e) = sqlx::query(
+                "INSERT INTO node_metrics_latest \
+                 (node_id, cpu_name, cpu_cores, arch, os, kernel, virtualization, \
+                  cpu_usage, ram_total, ram_used, swap_total, swap_used, disk_total, disk_used, \
+                  load1, load5, load15, net_up_bps, net_down_bps, net_total_up, net_total_down, \
+                  tcp_conns, udp_conns, uptime_secs, process_count, updated_at) \
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+                 ON CONFLICT(node_id) DO UPDATE SET \
+                  cpu_name=excluded.cpu_name, cpu_cores=excluded.cpu_cores, arch=excluded.arch, \
+                  os=excluded.os, kernel=excluded.kernel, virtualization=excluded.virtualization, \
+                  cpu_usage=excluded.cpu_usage, ram_total=excluded.ram_total, ram_used=excluded.ram_used, \
+                  swap_total=excluded.swap_total, swap_used=excluded.swap_used, \
+                  disk_total=excluded.disk_total, disk_used=excluded.disk_used, \
+                  load1=excluded.load1, load5=excluded.load5, load15=excluded.load15, \
+                  net_up_bps=excluded.net_up_bps, net_down_bps=excluded.net_down_bps, \
+                  net_total_up=excluded.net_total_up, net_total_down=excluded.net_total_down, \
+                  tcp_conns=excluded.tcp_conns, udp_conns=excluded.udp_conns, \
+                  uptime_secs=excluded.uptime_secs, process_count=excluded.process_count, \
+                  updated_at=excluded.updated_at"
+            )
+                .bind(&r.node_id)
+                .bind(&m.cpu_name).bind(m.cpu_cores as i64).bind(&m.arch)
+                .bind(&m.os).bind(&m.kernel).bind(&m.virtualization)
+                .bind(m.cpu_usage).bind(m.ram_total as i64).bind(m.ram_used as i64)
+                .bind(m.swap_total as i64).bind(m.swap_used as i64)
+                .bind(m.disk_total as i64).bind(m.disk_used as i64)
+                .bind(m.load1).bind(m.load5).bind(m.load15)
+                .bind(m.net_up_bps as i64).bind(m.net_down_bps as i64)
+                .bind(m.net_total_up as i64).bind(m.net_total_down as i64)
+                .bind(m.tcp_conns as i64).bind(m.udp_conns as i64)
+                .bind(m.uptime_secs as i64).bind(m.process_count as i64)
+                .bind(now)
+                .execute(&self.pool).await
+            {
+                tracing::warn!(node = %r.node_id, error = %e, "更新 node_metrics_latest 失败");
+            }
+            // History：每 30s 取整一次，PK 冲突 = 已写过当周期，跳过。
+            let bucket = (now / 30_000) * 30_000;
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO node_metrics_history \
+                 (node_id, ts_ms, cpu_usage, ram_used, disk_used, load1, net_up_bps, net_down_bps) \
+                 VALUES (?,?,?,?,?,?,?,?)"
+            )
+                .bind(&r.node_id).bind(bucket)
+                .bind(m.cpu_usage).bind(m.ram_used as i64).bind(m.disk_used as i64)
+                .bind(m.load1).bind(m.net_up_bps as i64).bind(m.net_down_bps as i64)
+                .execute(&self.pool).await;
+        }
         if let Some(new_addr) = resolve_advertised_addr(&r.advertised_addr, peer_ip) {
             let cur: Option<(String,)> = sqlx::query_as("SELECT addr FROM nodes WHERE id=?")
                 .bind(&r.node_id).fetch_optional(&self.pool).await.ok().flatten();
@@ -771,6 +822,24 @@ async fn main() -> Result<()> {
                 tick.tick().await;
                 if let Err(e) = session_retention_pass(&pool).await {
                     tracing::warn!(error = %e, "session retention pass failed");
+                }
+            }
+        });
+    }
+
+    // M7 node_metrics_history trim：每 1h 跑一次，删除 > 24h 的样本。
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let cutoff = now_ms() as i64 - 24 * 3600 * 1000;
+                if let Err(e) = sqlx::query("DELETE FROM node_metrics_history WHERE ts_ms < ?")
+                    .bind(cutoff).execute(&pool).await
+                {
+                    tracing::warn!(error = %e, "node_metrics_history trim failed");
                 }
             }
         });

@@ -6,9 +6,11 @@ import {
 import {
   PlusOutlined, DeleteOutlined, ReloadOutlined, CopyOutlined,
   CheckCircleFilled, MinusCircleFilled, QuestionCircleFilled,
+  DashboardOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { api, type Enrollment, type Node } from "../lib/api";
+import NodeMetricsModal from "./NodeMetricsModal";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -171,6 +173,7 @@ export default function Nodes() {
   const [form] = Form.useForm();
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [busy, setBusy] = useState(false);
+  const [metricsNodeId, setMetricsNodeId] = useState<string | null>(null);
   const { message } = App.useApp();
 
   const load = () => api.get<Node[]>("/api/nodes").then(setList).catch(() => setList([]));
@@ -241,6 +244,11 @@ export default function Nodes() {
       title: "操作", key: "actions", width: 200, align: "right",
       render: (_, n) => (
         <Space size={4}>
+          <Tooltip title="查看 CPU/内存/磁盘/网速 实时监控">
+            <Button type="link" size="small" icon={<DashboardOutlined />} onClick={() => setMetricsNodeId(n.id)}>
+              监控
+            </Button>
+          </Tooltip>
           <Tooltip title="重新生成安装令牌">
             <Button type="link" size="small" icon={<ReloadOutlined />} onClick={() => regenToken(n.id)}>
               重发令牌
@@ -351,6 +359,11 @@ export default function Nodes() {
         open={!!enrollment}
         enrollment={enrollment}
         onClose={() => setEnrollment(null)}
+      />
+
+      <NodeMetricsModal
+        nodeId={metricsNodeId}
+        onClose={() => setMetricsNodeId(null)}
       />
     </div>
   );

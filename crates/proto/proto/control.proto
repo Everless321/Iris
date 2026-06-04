@@ -36,6 +36,42 @@ message HeartbeatRequest {
   // M4 fast path 能力 JSON。例：{"fastpath":true,"kernel":"6.1.0","reason":"ok","in_container":false}
   // 空字符串 / 不存在 = 老节点不支持上报，master 视为 fastpath=false。
   string capabilities = 9;
+  // M7 节点资源指标（CPU/RAM/disk/load/network/uptime 等）。
+  // 不存在 = 老节点未上报，master UI 显示 "—"。每次心跳带，master 覆盖 latest
+  // 表 + append 到 history 表（30s 采样保留 24h）。
+  NodeMetrics metrics = 10;
+}
+
+// M7 节点资源指标。静态字段（cpu_name, cores, os 等）随心跳重复发送以容忍 master 重启。
+// 动态指标（cpu_usage, ram_used, net_*_bps 等）每次采样上报。
+message NodeMetrics {
+  // 静态
+  string cpu_name = 1;
+  uint32 cpu_cores = 2;
+  string arch = 3;             // "x86_64" / "aarch64"
+  string os = 4;               // "Debian 13" / "Ubuntu 24.04"
+  string kernel = 5;           // "6.1.0-25-amd64"
+  string virtualization = 6;   // "kvm" / "vmware" / "docker" / "none"
+
+  // 动态
+  double cpu_usage = 10;       // 0-100
+  uint64 ram_total = 11;       // bytes
+  uint64 ram_used = 12;
+  uint64 swap_total = 13;
+  uint64 swap_used = 14;
+  uint64 disk_total = 15;      // bytes (root /)
+  uint64 disk_used = 16;
+  double load1 = 17;
+  double load5 = 18;
+  double load15 = 19;
+  uint64 net_up_bps = 20;      // 即时上行 bps（采样窗口 ~1s）
+  uint64 net_down_bps = 21;
+  uint64 net_total_up = 22;    // 系统启动以来累计上行字节
+  uint64 net_total_down = 23;
+  uint32 tcp_conns = 24;       // ESTABLISHED 数（含转发数据通道）
+  uint32 udp_conns = 25;
+  uint64 uptime_secs = 26;
+  uint32 process_count = 27;
 }
 
 // 单条 TCP 会话（每个 forward 入口 accept 的 connection）。

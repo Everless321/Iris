@@ -33,3 +33,5 @@ governor = "0.6"
 # M4 fastpath capability JSON 序列化 + nft -j list ruleset 解析
 serde = { workspace = true }
 serde_json = { workspace = true }
+# M7 节点资源监控：CPU/RAM/disk/load/network/uptime 等
+sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network", "component"] }

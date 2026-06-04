@@ -77,6 +77,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/:id", axum::routing::delete(delete_node))
         .route("/api/nodes/:id/enrollment", post(create_enrollment))
         .route("/api/nodes/enroll", post(enroll_node))
+        // M7 节点资源监控
+        .route("/api/nodes/:id/metrics", get(get_node_metrics))
+        .route("/api/nodes/:id/metrics/history", get(get_node_metrics_history))
         .route("/install.sh", get(install_script))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
@@ -267,6 +270,68 @@ async fn delete_node(
     }
     sqlx::query("DELETE FROM nodes WHERE id=?").bind(id).execute(&s.pool).await.map_err(err)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- M7 节点资源监控 ----
+
+async fn get_node_metrics(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT node_id, cpu_name, cpu_cores, arch, os, kernel, virtualization, \
+         cpu_usage, ram_total, ram_used, swap_total, swap_used, disk_total, disk_used, \
+         load1, load5, load15, net_up_bps, net_down_bps, net_total_up, net_total_down, \
+         tcp_conns, udp_conns, uptime_secs, process_count, updated_at \
+         FROM node_metrics_latest WHERE node_id=?"
+    ).bind(&id).fetch_optional(&s.pool).await.map_err(err)?;
+    let v = match row {
+        Some(r) => serde_json::json!({
+            "node_id": r.get::<String, _>(0),
+            "cpu_name": r.get::<String, _>(1), "cpu_cores": r.get::<i64, _>(2), "arch": r.get::<String, _>(3),
+            "os": r.get::<String, _>(4), "kernel": r.get::<String, _>(5), "virtualization": r.get::<String, _>(6),
+            "cpu_usage": r.get::<f64, _>(7),
+            "ram_total": r.get::<i64, _>(8), "ram_used": r.get::<i64, _>(9),
+            "swap_total": r.get::<i64, _>(10), "swap_used": r.get::<i64, _>(11),
+            "disk_total": r.get::<i64, _>(12), "disk_used": r.get::<i64, _>(13),
+            "load1": r.get::<f64, _>(14), "load5": r.get::<f64, _>(15), "load15": r.get::<f64, _>(16),
+            "net_up_bps": r.get::<i64, _>(17), "net_down_bps": r.get::<i64, _>(18),
+            "net_total_up": r.get::<i64, _>(19), "net_total_down": r.get::<i64, _>(20),
+            "tcp_conns": r.get::<i64, _>(21), "udp_conns": r.get::<i64, _>(22),
+            "uptime_secs": r.get::<i64, _>(23), "process_count": r.get::<i64, _>(24),
+            "updated_at": r.get::<i64, _>(25),
+        }),
+        None => serde_json::Value::Null,
+    };
+    Ok(Json(v))
+}
+
+#[derive(serde::Deserialize)]
+struct HistoryQuery {
+    /// 时间窗口（秒）。默认 3600 = 1h，最大 86400 = 24h。
+    #[serde(default)]
+    window: Option<i64>,
+}
+
+async fn get_node_metrics_history(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiErr> {
+    let window_secs = q.window.unwrap_or(3600).clamp(60, 86400);
+    let since = now_ms() as i64 - window_secs * 1000;
+    let rows: Vec<(i64, f64, i64, i64, f64, i64, i64)> = sqlx::query_as(
+        "SELECT ts_ms, cpu_usage, ram_used, disk_used, load1, net_up_bps, net_down_bps \
+         FROM node_metrics_history WHERE node_id=? AND ts_ms >= ? ORDER BY ts_ms"
+    ).bind(&id).bind(since).fetch_all(&s.pool).await.map_err(err)?;
+    let v: Vec<serde_json::Value> = rows.into_iter().map(|r| serde_json::json!({
+        "ts_ms": r.0, "cpu_usage": r.1, "ram_used": r.2, "disk_used": r.3,
+        "load1": r.4, "net_up_bps": r.5, "net_down_bps": r.6,
+    })).collect();
+    Ok(Json(v))
 }
 
 // ---- 转发：归属权限 ----
