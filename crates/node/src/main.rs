@@ -9,6 +9,8 @@ mod raw_tunnel;
 mod session;
 mod sock;
 mod udp_forward;
+#[cfg(target_os = "linux")]
+mod zero_copy;
 
 use anyhow::Result;
 use dataplane::{DataPlaneSvc, NodeCtx, NodeInfo};

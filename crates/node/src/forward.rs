@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use iris_proto::control::TargetEndpoint;
 
@@ -85,53 +84,75 @@ pub async fn run_single_hop(
                 vec![(*entry_node_id).clone()],
                 "tcp",
             );
-            // split + 手动双向 loop 以便统计字节数。
-            // inbound = 客户端连接,outbound = target 连接。
-            // bytes_in  = 入口 inbound.read = 客户端发来的字节
-            // bytes_out = 入口 inbound.write = 写回客户端的字节
-            let (mut ir, mut iw) = inbound.into_split();
-            let (mut tr, mut tw) = outbound.into_split();
+            // bytes_in  = 客户端 → target（入口视角"上传"）
+            // bytes_out = target → 客户端（"下载"）
             let traffic_up = traffic.clone();
             let sess_up = session.clone();
-            let rate_up = rate.up.clone();
-            let up = tokio::spawn(async move {
-                let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    match ir.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            // #39 限速：阻塞直到 token bucket 放行（None 时立即 return）
-                            crate::ratelimit::throttle(&rate_up, n).await;
-                            traffic_up.add_in(n);
-                            sess_up.add_in(n);
-                            if tw.write_all(&buf[..n]).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
             let traffic_dn = traffic.clone();
             let sess_dn = session.clone();
-            let rate_down = rate.down.clone();
-            let down = tokio::spawn(async move {
-                let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    match tr.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            crate::ratelimit::throttle(&rate_down, n).await;
-                            if iw.write_all(&buf[..n]).await.is_err() {
-                                break;
-                            }
-                            traffic_dn.add_out(n);
-                            sess_dn.add_out(n);
-                        }
-                    }
-                }
-            });
-            tokio::select! { _ = up => {}, _ = down => {} }
+            let on_up = move |n: usize| {
+                traffic_up.add_in(n);
+                sess_up.add_in(n);
+            };
+            let on_down = move |n: usize| {
+                traffic_dn.add_out(n);
+                sess_dn.add_out(n);
+            };
+            forward_bidirectional(
+                inbound,
+                outbound,
+                rate.up.clone(),
+                rate.down.clone(),
+                on_up,
+                on_down,
+            )
+            .await;
             session.close("normal");
         });
+    }
+}
+
+/// 单跳双向转发分发：
+/// - Linux: `splice(2)` 零拷贝，单流 TCP 接近裸金属带宽
+/// - 其他平台: tokio `copy_bidirectional`，buf 内核管理，比手动 read/write 略快
+///
+/// 两路径都通过回调把搬运字节数喂给 traffic/session 计数器 + ratelimit。
+#[cfg(target_os = "linux")]
+async fn forward_bidirectional<U, D>(
+    inbound: TcpStream,
+    outbound: TcpStream,
+    rate_up: Option<Arc<crate::ratelimit::Limiter>>,
+    rate_down: Option<Arc<crate::ratelimit::Limiter>>,
+    on_up: U,
+    on_down: D,
+) where
+    U: FnMut(usize) + Send + 'static,
+    D: FnMut(usize) + Send + 'static,
+{
+    crate::zero_copy::splice_bidirectional(inbound, outbound, rate_up, rate_down, on_up, on_down)
+        .await;
+}
+
+/// 非 Linux fallback：copy_bidirectional 不支持 per-byte 回调，
+/// 只能在结束时一次性结算（精度足够，因为统计是累计量）。限速在该路径下退化为不生效，
+/// 等同于 buf-based 实现里 None limiter 的 noop 路径（macOS/Windows 通常仅开发环境用）。
+#[cfg(not(target_os = "linux"))]
+async fn forward_bidirectional<U, D>(
+    mut inbound: TcpStream,
+    mut outbound: TcpStream,
+    _rate_up: Option<Arc<crate::ratelimit::Limiter>>,
+    _rate_down: Option<Arc<crate::ratelimit::Limiter>>,
+    mut on_up: U,
+    mut on_down: D,
+) where
+    U: FnMut(usize) + Send + 'static,
+    D: FnMut(usize) + Send + 'static,
+{
+    match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+        Ok((up, down)) => {
+            on_up(up as usize);
+            on_down(down as usize);
+        }
+        Err(e) => tracing::debug!(error = %e, "copy_bidirectional ended"),
     }
 }
