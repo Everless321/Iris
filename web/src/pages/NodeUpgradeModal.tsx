@@ -27,9 +27,18 @@ export default function NodeUpgradeModal({ nodeId, open, onClose }: Props) {
   const [row, setRow] = useState<CommandRow | null>(null);
   const [starting, setStarting] = useState(false);
   const timerRef = useRef<number | null>(null);
+  // 防止 effect 因父组件 onClose 引用变化重跑 → POST 多次 → CONFLICT
+  const triggeredKeyRef = useRef<string | null>(null);
+  // ref 镜像最新 callback，避免把 onClose 列入 deps
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open || !nodeId) return;
+    // 同一 (open, nodeId) 只触发一次升级请求 —— 即使 effect 因依赖引用变化重跑
+    const key = `${nodeId}`;
+    if (triggeredKeyRef.current === key) return;
+    triggeredKeyRef.current = key;
     setRequestId(null);
     setRow(null);
     setStarting(true);
@@ -47,7 +56,7 @@ export default function NodeUpgradeModal({ nodeId, open, onClose }: Props) {
       .catch((e) => {
         const msg = e?.message || "升级触发失败";
         message.error(String(msg));
-        onClose();
+        onCloseRef.current();
       })
       .finally(() => setStarting(false));
 
@@ -58,7 +67,13 @@ export default function NodeUpgradeModal({ nodeId, open, onClose }: Props) {
         timerRef.current = null;
       }
     };
-  }, [open, nodeId, message, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, nodeId]);
+
+  // Modal 关闭时重置 triggered key，下次打开同节点能重新触发
+  useEffect(() => {
+    if (!open) triggeredKeyRef.current = null;
+  }, [open]);
 
   // 轮询命令状态直到终态
   useEffect(() => {
