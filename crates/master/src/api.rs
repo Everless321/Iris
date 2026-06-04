@@ -52,6 +52,25 @@ pub struct AppState {
     pub metrics_tx: broadcast::Sender<MetricsBroadcast>,
     /// M7.1 metrics SSE 单用 ticket（独立 pool 与 sessions 分离，便于审计）
     pub metrics_sse_tickets: Arc<Mutex<HashMap<String, MetricsSseTicketEntry>>>,
+    /// M8 命令路由表（node_id → mpsc::Sender<Command>）。节点开 Commands stream 时注册,
+    /// 上层 enqueue_command 拿到 tx 推 Command；send 失败 = 节点离线。
+    pub command_routers: CommandRouters,
+    /// M8 命令进度 SSE 广播：节点 AckCommand 后推给 UI 订阅者。
+    pub commands_tx: broadcast::Sender<CommandProgress>,
+}
+
+/// M8 命令路由表类型别名（多模块共享）。
+pub type CommandRouters = Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::mpsc::Sender<Result<iris_proto::control::Command, tonic::Status>>>>>;
+
+/// M8 命令进度广播（节点 ack → 推 UI 订阅者）。
+#[derive(Clone, Debug)]
+pub struct CommandProgress {
+    pub node_id: String,
+    pub request_id: String,
+    pub status: i32,
+    pub stage: String,
+    pub detail: String,
+    pub at_ms: i64,
 }
 
 #[derive(Clone)]
@@ -100,6 +119,11 @@ pub fn router(state: AppState) -> Router {
         // M7.1 实时 SSE 推送
         .route("/api/nodes/:id/metrics/sse-ticket", post(issue_metrics_sse_ticket))
         .route("/api/nodes/:id/metrics/stream", get(metrics_stream))
+        // M8 agent 远程升级
+        .route("/api/nodes/:id/upgrade", post(trigger_upgrade))
+        .route("/api/commands", get(list_recent_commands))
+        .route("/api/commands/:request_id", get(get_command))
+        .route("/api/commands/stream", get(commands_stream))
         .route("/install.sh", get(install_script))
         // 转发：customer 仅看/改自己；admin 全权
         .route("/api/forwards", get(list_forwards).post(create_forward))
@@ -398,6 +422,169 @@ async fn metrics_stream(
             Some(Ok(Event::default().event("metrics").data(data)))
         }
         Ok(_) => None,
+        Err(_) => None,
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+// ---- M8 agent 远程升级 ----
+
+#[derive(Deserialize)]
+struct UpgradeReq {
+    /// 空 = rolling latest；非空 = 指定 release tag（如 v0.2.0）
+    #[serde(default)]
+    target_ref: String,
+    /// 可选 sha256（master 没缓存 release asset 校验和时由调用方提供）
+    #[serde(default)]
+    expected_sha256: String,
+}
+
+#[derive(Serialize)]
+struct UpgradeResp {
+    request_id: String,
+    node_id: String,
+    issued_at_ms: i64,
+}
+
+/// admin 触发节点升级：写入 node_commands + 通过 mpsc 推给在线节点 stream。
+/// 节点离线返回 503（命令仍入库，节点重连时 drain pending）。
+async fn trigger_upgrade(
+    claims: Claims,
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+    Json(req): Json<UpgradeReq>,
+) -> Result<Json<UpgradeResp>, ApiErr> {
+    if !claims.is_admin() {
+        return Err((StatusCode::FORBIDDEN, "admin only".into()));
+    }
+    // 节点必须存在
+    let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes WHERE id=?")
+        .bind(&node_id)
+        .fetch_one(&s.pool)
+        .await
+        .map_err(err)?;
+    if exists == 0 {
+        return Err((StatusCode::NOT_FOUND, "node not found".into()));
+    }
+    // 防并发：同节点是否已有未终态命令
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_commands WHERE node_id=? AND status IN (1, 2)",
+    )
+    .bind(&node_id)
+    .fetch_one(&s.pool)
+    .await
+    .map_err(err)?;
+    if pending > 0 {
+        return Err((StatusCode::CONFLICT, "another command in progress".into()));
+    }
+    let request_id = Uuid::new_v4().to_string();
+    let now = now_ms();
+    let payload = serde_json::json!({
+        "kind": "upgrade",
+        "expected_sha256": req.expected_sha256,
+        "target_ref": req.target_ref,
+    });
+    sqlx::query(
+        "INSERT INTO node_commands \
+         (request_id, node_id, kind, payload, status, issued_by, issued_at_ms) \
+         VALUES (?, ?, 'upgrade', ?, 1, ?, ?)",
+    )
+    .bind(&request_id)
+    .bind(&node_id)
+    .bind(payload.to_string())
+    .bind(claims.sub)
+    .bind(now)
+    .execute(&s.pool)
+    .await
+    .map_err(err)?;
+    // 推 stream（节点在线才生效；离线时 stream 重连时会 drain pending）
+    let routers = s.command_routers.lock().await;
+    if let Some(tx) = routers.get(&node_id) {
+        let cmd = iris_proto::control::Command {
+            request_id: request_id.clone(),
+            issued_at_ms: now,
+            kind: Some(iris_proto::control::command::Kind::Upgrade(
+                iris_proto::control::UpgradeCommand {
+                    expected_sha256: req.expected_sha256,
+                    target_ref: req.target_ref,
+                },
+            )),
+        };
+        if tx.send(Ok(cmd)).await.is_err() {
+            tracing::warn!(%node_id, %request_id, "node stream closed during enqueue");
+        }
+    } else {
+        tracing::info!(%node_id, %request_id, "node offline, command queued");
+    }
+    Ok(Json(UpgradeResp { request_id, node_id, issued_at_ms: now }))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct CommandRow {
+    request_id: String,
+    node_id: String,
+    kind: String,
+    payload: String,
+    status: i32,
+    stage: String,
+    detail: String,
+    issued_at_ms: i64,
+    delivered_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+}
+
+async fn get_command(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(request_id): Path<String>,
+) -> Result<Json<CommandRow>, ApiErr> {
+    let row = sqlx::query_as::<_, CommandRow>(
+        "SELECT request_id, node_id, kind, payload, status, stage, detail, \
+         issued_at_ms, delivered_at_ms, finished_at_ms \
+         FROM node_commands WHERE request_id=?",
+    )
+    .bind(&request_id)
+    .fetch_optional(&s.pool)
+    .await
+    .map_err(err)?
+    .ok_or((StatusCode::NOT_FOUND, "command not found".into()))?;
+    Ok(Json(row))
+}
+
+async fn list_recent_commands(
+    _: AdminClaims,
+    State(s): State<AppState>,
+) -> Result<Json<Vec<CommandRow>>, ApiErr> {
+    let rows = sqlx::query_as::<_, CommandRow>(
+        "SELECT request_id, node_id, kind, payload, status, stage, detail, \
+         issued_at_ms, delivered_at_ms, finished_at_ms \
+         FROM node_commands ORDER BY issued_at_ms DESC LIMIT 100",
+    )
+    .fetch_all(&s.pool)
+    .await
+    .map_err(err)?;
+    Ok(Json(rows))
+}
+
+/// SSE 推送命令进度。所有 admin 共享一个广播 channel；不需要 ticket（这个端点只暴露状态推进,
+/// 不暴露 cert/secret，复用主 JWT cookie 即可）。
+async fn commands_stream(
+    _: AdminClaims,
+    State(s): State<AppState>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiErr> {
+    let rx = s.commands_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+        Ok(p) => {
+            let payload = serde_json::json!({
+                "node_id": p.node_id,
+                "request_id": p.request_id,
+                "status": p.status,
+                "stage": p.stage,
+                "detail": p.detail,
+                "at_ms": p.at_ms,
+            });
+            Some(Ok(Event::default().event("progress").data(payload.to_string())))
+        }
         Err(_) => None,
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

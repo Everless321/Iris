@@ -6,11 +6,12 @@ import {
 import {
   PlusOutlined, DeleteOutlined, ReloadOutlined, CopyOutlined,
   CheckCircleFilled, MinusCircleFilled, QuestionCircleFilled,
-  DashboardOutlined,
+  DashboardOutlined, CloudUploadOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { api, type Enrollment, type Node } from "../lib/api";
 import NodeMetricsModal from "./NodeMetricsModal";
+import NodeUpgradeModal from "./NodeUpgradeModal";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -174,6 +175,7 @@ export default function Nodes() {
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [busy, setBusy] = useState(false);
   const [metricsNodeId, setMetricsNodeId] = useState<string | null>(null);
+  const [upgradeNodeId, setUpgradeNodeId] = useState<string | null>(null);
   const { message } = App.useApp();
 
   const load = () => api.get<Node[]>("/api/nodes").then(setList).catch(() => setList([]));
@@ -249,6 +251,16 @@ export default function Nodes() {
               监控
             </Button>
           </Tooltip>
+          <Popconfirm
+            title={`远程升级 ${n.id}?`}
+            description="节点会下载最新 rolling binary 并自动 swap + restart。失败会自动回滚 .bak"
+            okText="升级" cancelText="取消"
+            onConfirm={() => setUpgradeNodeId(n.id)}
+          >
+            <Tooltip title="拉取最新 binary 并升级（自带 60s watchdog 自愈）">
+              <Button type="link" size="small" icon={<CloudUploadOutlined />}>升级</Button>
+            </Tooltip>
+          </Popconfirm>
           <Tooltip title="重新生成安装令牌">
             <Button type="link" size="small" icon={<ReloadOutlined />} onClick={() => regenToken(n.id)}>
               重发令牌
@@ -364,6 +376,12 @@ export default function Nodes() {
       <NodeMetricsModal
         nodeId={metricsNodeId}
         onClose={() => setMetricsNodeId(null)}
+      />
+
+      <NodeUpgradeModal
+        nodeId={upgradeNodeId}
+        open={upgradeNodeId !== null}
+        onClose={() => setUpgradeNodeId(null)}
       />
     </div>
   );

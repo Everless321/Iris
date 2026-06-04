@@ -9,6 +9,54 @@ service Control {
   // 节点 cert 临近过期主动续签：用现有 mTLS cert（仍有效）做客户端身份，
   // master 校验 peer cert CN == request.node_id 后用同一 CA 签发新 cert。
   rpc RenewCert (RenewCertRequest) returns (RenewCertReply);
+  // M8 agent 远程升级：server-streaming，节点启动后保持长连，master 按需推 Command。
+  // 客户端断流（mTLS 断 / 节点重启）时自然 GC。
+  rpc Commands (CommandsRequest) returns (stream Command);
+  // 节点回报命令执行进度（每阶段一次）。同 request_id 多次 ack 体现状态机推进。
+  rpc AckCommand (CommandAck) returns (CommandAckReply);
+}
+
+// M8 命令推送 ---------------------------------------------------
+
+message CommandsRequest {
+  string node_id = 1;
+}
+
+// 主控下发的命令。oneof.kind 区分类型，预留 reload/restart 扩展。
+message Command {
+  string request_id = 1;       // master 生成 UUID，节点回 ack 用
+  int64 issued_at_ms = 2;
+  oneof kind {
+    UpgradeCommand upgrade = 10;
+  }
+}
+
+// 节点端升级请求。expected_sha256 由 master 算 release asset 时缓存，
+// 节点下载完算 sha256 校验，不一致直接 abort（防中间人）。
+// target_ref 空 = rolling latest；非空 = 指定 release tag（如 v0.2.0）。
+message UpgradeCommand {
+  string expected_sha256 = 1;
+  string target_ref = 2;
+}
+
+// 节点 → master 命令状态回报。同 request_id 多次发送代表进度推进。
+message CommandAck {
+  string node_id = 1;
+  string request_id = 2;
+  CommandStatus status = 3;
+  string detail = 4;          // success: 摘要；failed/rejected: 错误原因
+  string stage = 5;           // "preflight" | "download" | "verify" | "swap" | "restart"
+}
+
+message CommandAckReply {}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  COMMAND_STATUS_RECEIVED = 1;
+  COMMAND_STATUS_RUNNING = 2;
+  COMMAND_STATUS_SUCCESS = 3;
+  COMMAND_STATUS_FAILED = 4;
+  COMMAND_STATUS_REJECTED = 5;  // preflight 失败：节点主动拒绝（不动旧 binary）
 }
 
 message HeartbeatRequest {

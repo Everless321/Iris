@@ -15,8 +15,10 @@ use tonic::transport::{Certificate, ClientTlsConfig, Identity, Server, ServerTls
 use tonic::{Request, Response, Status};
 use iris_proto::control::control_server::{Control, ControlServer};
 use iris_proto::control::{
-    ForwardRule, HeartbeatReply, HeartbeatRequest, Hop as PbHop, HopNode as PbHopNode, NodeAddr,
-    RenewCertReply, RenewCertRequest, SyncReply, SyncRequest, TargetEndpoint as PbTargetEndpoint,
+    command::Kind as CommandKind, Command, CommandAck, CommandAckReply, CommandStatus,
+    CommandsRequest, ForwardRule, HeartbeatReply, HeartbeatRequest, Hop as PbHop,
+    HopNode as PbHopNode, NodeAddr, RenewCertReply, RenewCertRequest, SyncReply, SyncRequest,
+    TargetEndpoint as PbTargetEndpoint, UpgradeCommand,
 };
 
 use models::ForwardRow;
@@ -360,6 +362,12 @@ struct ControlSvc {
     metrics_tx: tokio::sync::broadcast::Sender<api::MetricsBroadcast>,
     /// entry_forward_ids 的 fail-close 兜底：DB 抖动时用 cached allowlist 继续 enforce。
     allowlist_cache: AllowlistCache,
+    /// M8 远程命令推送：节点 id → mpsc::Sender。节点开 Commands stream 时注册 tx。
+    /// API 层调 enqueue_command(node_id) 拿到 tx 推 Command。节点断流时下次 send 会失败,
+    /// 上层据此判定"节点离线"。
+    command_routers: api::CommandRouters,
+    /// M8 命令进度 SSE 广播：节点 AckCommand 后推给 UI 订阅者。
+    commands_tx: tokio::sync::broadcast::Sender<api::CommandProgress>,
 }
 
 /// 从 tonic Request 的 mTLS peer cert 链中解析首张证书的 Subject CN。
@@ -785,6 +793,131 @@ impl Control for ControlSvc {
         tracing::info!(node = %r.node_id, valid_until_ms, "renew_cert: issued new cert");
         Ok(Response::new(RenewCertReply { cert_pem, key_pem, valid_until_ms }))
     }
+
+    // M8 命令推送 stream（server-streaming）。节点启动后维持长连，断线 → tx drop → 自动 GC。
+    type CommandsStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<Command, Status>> + Send>,
+    >;
+    async fn commands(
+        &self,
+        req: Request<CommandsRequest>,
+    ) -> Result<Response<Self::CommandsStream>, Status> {
+        let cn_node = peer_cn_node_id(&req)
+            .ok_or_else(|| Status::permission_denied("missing or invalid peer cert"))?;
+        let nid = req.into_inner().node_id;
+        if nid.is_empty() || nid != cn_node {
+            return Err(Status::permission_denied("node_id mismatch with peer cert"));
+        }
+        // mpsc 缓冲 16：命令低频，足够；满了发送方阻塞 = 反压，不丢命令。
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Command, Status>>(16);
+
+        // 注册/替换路由：旧 tx drop 后旧 stream 会自然结束（节点重连场景）
+        {
+            let mut routers = self.command_routers.lock().await;
+            routers.insert(nid.clone(), tx.clone());
+        }
+
+        // 入流即 drain pending（status=RECEIVED 但未投递的）— 节点重启场景
+        let pool = self.pool.clone();
+        let nid_clone = nid.clone();
+        tokio::spawn(async move {
+            let pending: Vec<(String, String, i64)> = sqlx::query_as(
+                "SELECT request_id, payload, issued_at_ms FROM node_commands \
+                 WHERE node_id=? AND status=? ORDER BY issued_at_ms",
+            )
+            .bind(&nid_clone)
+            .bind(CommandStatus::Received as i32)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            for (request_id, payload, issued_at_ms) in pending {
+                if let Some(cmd) = build_command(&request_id, issued_at_ms, &payload) {
+                    if tx.send(Ok(cmd)).await.is_err() {
+                        break; // 节点又断了
+                    }
+                }
+            }
+        });
+
+        tracing::info!(node = %nid, "command stream opened");
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn ack_command(
+        &self,
+        req: Request<CommandAck>,
+    ) -> Result<Response<CommandAckReply>, Status> {
+        let cn_node = peer_cn_node_id(&req)
+            .ok_or_else(|| Status::permission_denied("missing or invalid peer cert"))?;
+        let a = req.into_inner();
+        if a.node_id != cn_node {
+            return Err(Status::permission_denied("node_id mismatch with peer cert"));
+        }
+        let now = now_ms() as i64;
+        let is_terminal = matches!(
+            CommandStatus::try_from(a.status).unwrap_or(CommandStatus::Unspecified),
+            CommandStatus::Success | CommandStatus::Failed | CommandStatus::Rejected
+        );
+        let delivered: Option<i64> = if a.status == CommandStatus::Received as i32 {
+            Some(now)
+        } else {
+            None
+        };
+        let finished: Option<i64> = if is_terminal { Some(now) } else { None };
+        let res = sqlx::query(
+            "UPDATE node_commands SET status=?, stage=?, detail=?, \
+             delivered_at_ms = COALESCE(delivered_at_ms, ?), \
+             finished_at_ms  = COALESCE(?, finished_at_ms) \
+             WHERE request_id=? AND node_id=?",
+        )
+        .bind(a.status)
+        .bind(&a.stage)
+        .bind(&a.detail)
+        .bind(delivered)
+        .bind(finished)
+        .bind(&a.request_id)
+        .bind(&a.node_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if res.rows_affected() == 0 {
+            tracing::warn!(node = %a.node_id, req = %a.request_id, "ack: unknown command");
+        }
+        tracing::info!(
+            node = %a.node_id, req = %a.request_id, status = a.status,
+            stage = %a.stage, "command ack"
+        );
+        // 推 SSE 给 UI
+        let _ = self.commands_tx.send(api::CommandProgress {
+            node_id: a.node_id,
+            request_id: a.request_id,
+            status: a.status,
+            stage: a.stage,
+            detail: a.detail,
+            at_ms: now,
+        });
+        Ok(Response::new(CommandAckReply {}))
+    }
+}
+
+/// 从 DB payload (JSON) 反序列化构造 Command proto。kind 字段决定 oneof。
+fn build_command(request_id: &str, issued_at_ms: i64, payload: &str) -> Option<Command> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let kind_str = v.get("kind").and_then(|x| x.as_str())?;
+    let kind = match kind_str {
+        "upgrade" => {
+            let expected_sha256 = v.get("expected_sha256").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let target_ref = v.get("target_ref").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            CommandKind::Upgrade(UpgradeCommand { expected_sha256, target_ref })
+        }
+        _ => return None,
+    };
+    Some(Command {
+        request_id: request_id.to_string(),
+        issued_at_ms,
+        kind: Some(kind),
+    })
 }
 
 #[tokio::main]
@@ -913,6 +1046,11 @@ async fn main() -> Result<()> {
     let metrics_sse_tickets: std::sync::Arc<std::sync::Mutex<HashMap<String, api::MetricsSseTicketEntry>>> =
         std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
+    // M8 命令路由表（node_id → mpsc tx）：节点开 Commands stream 时注册；
+    // HTTP API 调 enqueue_command(node_id) 拿到 tx 推 Command。
+    let command_routers: api::CommandRouters = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (commands_tx, _) = tokio::sync::broadcast::channel::<api::CommandProgress>(256);
+
     // HTTP 控制 API
     let auth_state = auth::AuthState::new(&jwt_secret());
     let app = api::router(api::AppState {
@@ -932,6 +1070,8 @@ async fn main() -> Result<()> {
         sse_tickets,
         metrics_tx: metrics_tx.clone(),
         metrics_sse_tickets,
+        command_routers: command_routers.clone(),
+        commands_tx: commands_tx.clone(),
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
@@ -961,6 +1101,8 @@ async fn main() -> Result<()> {
         sessions_tx,
         metrics_tx,
         allowlist_cache: Arc::new(RwLock::new(HashMap::new())),
+        command_routers,
+        commands_tx,
     };
     let addr = grpc_addr().parse()?;
     tracing::info!(%addr, "grpc control listening (mTLS)");

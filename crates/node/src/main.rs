@@ -10,6 +10,8 @@ mod session;
 mod sock;
 mod udp_forward;
 #[cfg(target_os = "linux")]
+mod upgrade;
+#[cfg(target_os = "linux")]
 mod zero_copy;
 
 use anyhow::Result;
@@ -680,6 +682,17 @@ async fn main() -> Result<()> {
         });
     }
 
+    // M8 agent 远程升级：长连命令流，断流自动重连。仅 linux 编译此模块。
+    #[cfg(target_os = "linux")]
+    {
+        let up_client = client.clone();
+        let up_node = node_id.clone();
+        let up_cert = cert_not_after.clone();
+        tokio::spawn(async move {
+            upgrade::run_command_stream(up_client, up_node, up_cert).await;
+        });
+    }
+
     // #36 会话级历史记录：节点全局 session table，每条 TCP 入口连接对应一个 SessionState。
     // heartbeat 时 snapshot_and_gc 上报 master；master 端 upsert by id 累计/标记关闭。
     let session_table = session::SessionTable::new();
@@ -742,7 +755,7 @@ async fn main() -> Result<()> {
         let listener_states = collect_listener_states(&active_forwards);
         let traffic_stats = collect_traffic_stats(&active_forwards);
         let metrics_sample = Some(metrics_collector.sample());
-        if let Err(e) = client
+        match client
             .heartbeat(HeartbeatRequest {
                 node_id: node_id.clone(),
                 seq,
@@ -757,7 +770,12 @@ async fn main() -> Result<()> {
             })
             .await
         {
-            tracing::warn!(seq, error = %e, "heartbeat failed");
+            Ok(_) => {
+                // M8 watchdog 输入：心跳成功就写状态文件。
+                // 升级后启动 60s 内 watchdog 检测 .heartbeat-state 来判断新 binary 是否健康。
+                let _ = std::fs::write("/opt/iris/.heartbeat-state", "ok\n");
+            }
+            Err(e) => tracing::warn!(seq, error = %e, "heartbeat failed"),
         }
         if let Ok(r) = client
             .sync_config(SyncRequest { node_id: node_id.clone() })

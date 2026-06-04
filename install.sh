@@ -191,9 +191,81 @@ SYSCTL
   sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-iris.conf >/dev/null 2>&1 || true
 }
 
+# ---- M8 watchdog wrapper ----
+# 升级后启动时 .upgrade-pending 存在 → 60s 内检测 .heartbeat-state ok,
+# 否则回滚到最近 .bak.<ts> + 重启。防止坏 binary 把 agent brick 掉。
+write_watchdog() {
+  cat > "$INSTALL_DIR/iris-node-watchdog.sh" <<'WD'
+#!/bin/sh
+# M8 self-heal wrapper —— 升级后看门狗
+set -e
+INSTALL_DIR=/opt/iris
+BIN=$INSTALL_DIR/iris-node
+PENDING=$INSTALL_DIR/.upgrade-pending
+HB=$INSTALL_DIR/.heartbeat-state
+
+# 启动前若发现 pending 标记 + 没有 heartbeat-state → 上次升级根本没起来,
+# 这是 systemd 第 2+ 次拉起的场景；直接回滚。
+maybe_rollback_pre_start() {
+  [ -f "$PENDING" ] || return 0
+  if [ ! -f "$HB" ] || ! grep -q ok "$HB" 2>/dev/null; then
+    bak=$(ls -1t "$INSTALL_DIR"/iris-node.bak.* 2>/dev/null | head -1)
+    if [ -n "$bak" ] && [ -x "$bak" ]; then
+      echo "[watchdog] previous upgrade unhealthy, rolling back to $bak" >&2
+      cp -f "$bak" "$BIN" 2>/dev/null || true
+      rm -f "$PENDING"
+    fi
+  fi
+}
+
+# 启动后 60s 监控：如还在 pending 但心跳没起来，杀掉 + 回滚
+post_start_watch() {
+  child_pid="$1"
+  [ -f "$PENDING" ] || return 0
+  # 清掉旧的 heartbeat-state 让本次升级独立判定
+  rm -f "$HB"
+  # 等 60s
+  i=0
+  while [ $i -lt 60 ]; do
+    sleep 1
+    i=$((i+1))
+    if [ -f "$HB" ] && grep -q ok "$HB" 2>/dev/null; then
+      echo "[watchdog] upgrade verified healthy after ${i}s" >&2
+      rm -f "$PENDING"
+      return 0
+    fi
+    # 子进程意外退出，systemd 会接手 restart，本 wrapper 结束
+    kill -0 "$child_pid" 2>/dev/null || return 0
+  done
+  echo "[watchdog] upgrade unhealthy after 60s, killing + rolling back" >&2
+  kill "$child_pid" 2>/dev/null || true
+  bak=$(ls -1t "$INSTALL_DIR"/iris-node.bak.* 2>/dev/null | head -1)
+  if [ -n "$bak" ] && [ -x "$bak" ]; then
+    mv "$BIN" "$INSTALL_DIR/iris-node.failed.$$" 2>/dev/null || true
+    cp -f "$bak" "$BIN"
+  fi
+  rm -f "$PENDING"
+  # systemd Restart=always 会重新拉起，这次 binary 是回滚后的旧版
+  exit 1
+}
+
+maybe_rollback_pre_start
+"$BIN" &
+PID=$!
+post_start_watch "$PID" &
+WATCH=$!
+wait $PID
+EXIT=$?
+kill $WATCH 2>/dev/null || true
+exit $EXIT
+WD
+  chmod +x "$INSTALL_DIR/iris-node-watchdog.sh"
+}
+
 # ---- systemd unit writer ----
 write_systemd_unit() {
   local node_id="$1"
+  write_watchdog
   cat > /etc/systemd/system/iris-node.service <<UNIT
 [Unit]
 Description=Iris Node ($node_id)
@@ -204,9 +276,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=$INSTALL_DIR/iris-node
+ExecStart=$INSTALL_DIR/iris-node-watchdog.sh
 WorkingDirectory=$INSTALL_DIR
-# cert 续签时节点 std::process::exit(0)，依赖 Restart=always 把它拉起来
+# cert 续签 / M8 升级时节点 std::process::exit(0)，依赖 Restart=always 把它拉起来
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576

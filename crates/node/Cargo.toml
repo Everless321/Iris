@@ -35,6 +35,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # M7 节点资源监控：CPU/RAM/disk/load/network/uptime 等
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network", "component"] }
+# M8 agent 远程升级：sha256 校验
+sha2 = "0.10"
+hex = "0.4"
 
 # M7.2 splice(2) 零拷贝单跳 fastpath（Linux only；其他平台走 copy_bidirectional 回退）
 [target.'cfg(target_os = "linux")'.dependencies]
