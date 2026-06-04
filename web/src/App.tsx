@@ -23,6 +23,15 @@ function Protected({ children, admin = false }: { children: React.ReactNode; adm
   return <>{children}</>;
 }
 
+/// 旧 URL 书签兼容：把 /forwards/X/Y → /admin/forwards/X/Y 等。
+function LegacyRedirect({ to }: { to: string }) {
+  const loc = useLocation();
+  // 提取后续 path 段 (e.g. /forwards/26/edit → /26/edit)
+  const prefix = "/" + loc.pathname.split("/")[1]; // /forwards
+  const rest = loc.pathname.slice(prefix.length); // /26/edit
+  return <Navigate to={`${to}${rest}${loc.search}`} replace />;
+}
+
 export default function App() {
   const init = useAuth((s) => s.init);
   useEffect(() => {
@@ -34,6 +43,12 @@ export default function App() {
       <Route path="/" element={<StatusBoard />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      {/* 旧 URL 书签兼容：/forwards/26/edit → /admin/forwards/26/edit */}
+      <Route path="/forwards/*" element={<LegacyRedirect to="/admin/forwards" />} />
+      <Route path="/nodes/*" element={<LegacyRedirect to="/admin/nodes" />} />
+      <Route path="/users/*" element={<LegacyRedirect to="/admin/users" />} />
+      <Route path="/invites/*" element={<LegacyRedirect to="/admin/invites" />} />
+      <Route path="/sla/*" element={<LegacyRedirect to="/admin/sla" />} />
       {/* 后台管理（带 auth）— 原 / 路径整体迁移到 /admin */}
       <Route
         path="/admin"

@@ -34,7 +34,7 @@ export default function Forwards() {
       width: 160,
       ellipsis: true,
       render: (name, f) => (
-        <Link to={`/forwards/${f.id}`}>
+        <Link to={`/admin/forwards/${f.id}`}>
           <Text strong ellipsis={{ tooltip: name }} style={{ maxWidth: 140 }}>{name}</Text>
         </Link>
       ),
@@ -120,7 +120,7 @@ export default function Forwards() {
       align: "right",
       render: (_, f) => (
         <Space size={4}>
-          <Link to={`/forwards/${f.id}/edit`}>
+          <Link to={`/admin/forwards/${f.id}/edit`}>
             <Button type="link" size="small" icon={<EditOutlined />}>编辑</Button>
           </Link>
           <Popconfirm

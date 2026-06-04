@@ -295,7 +295,7 @@ export default function ForwardDetail() {
             )}
           </div>
         </Space>
-        <Link to={`/forwards/${forwardId}/edit`}>
+        <Link to={`/admin/forwards/${forwardId}/edit`}>
           <Button icon={<EditOutlined />}>编辑</Button>
         </Link>
       </div>

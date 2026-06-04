@@ -17,18 +17,18 @@ import { useAuth } from "../lib/auth";
 const { Sider, Header, Content } = AntLayout;
 
 const TITLES: Record<string, string> = {
-  "/": "概览",
-  "/forwards": "转发管理",
-  "/forwards/new": "新建转发",
-  "/nodes": "节点管理",
-  "/users": "用户管理",
-  "/invites": "邀请码",
-  "/sla": "SLA 看板",
+  "/admin": "概览",
+  "/admin/forwards": "转发管理",
+  "/admin/forwards/new": "新建转发",
+  "/admin/nodes": "节点管理",
+  "/admin/users": "用户管理",
+  "/admin/invites": "邀请码",
+  "/admin/sla": "SLA 看板",
 };
 
 function pageTitle(path: string): string {
   if (TITLES[path]) return TITLES[path];
-  if (path.startsWith("/forwards/") && path.endsWith("/edit")) return "编辑转发";
+  if (path.startsWith("/admin/forwards/") && path.endsWith("/edit")) return "编辑转发";
   return "";
 }
 

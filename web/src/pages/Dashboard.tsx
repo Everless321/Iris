@@ -122,7 +122,7 @@ export default function Dashboard() {
             renderItem={(f) => (
               <List.Item
                 actions={[
-                  <Link to={`/forwards/${f.id}/edit`} key="view">
+                  <Link to={`/admin/forwards/${f.id}/edit`} key="view">
                     查看 <ArrowRightOutlined />
                   </Link>,
                 ]}
