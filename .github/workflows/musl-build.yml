@@ -20,6 +20,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 全历史：build.rs 用 git log -1 -- <path> 算"最后改 node 相关代码的 commit",
+          # 让 UI/master-only 改动不刷 node 版本号。
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
