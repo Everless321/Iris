@@ -215,10 +215,11 @@ export default function Nodes() {
     return () => clearInterval(t);
   }, []);
 
-  async function onAdd(v: { id: string; name: string; addr: string; weight: number }) {
+  async function onAdd(v: { id: string; name: string; addr?: string; weight: number }) {
     setBusy(true);
     try {
-      await api.post("/api/nodes", v);
+      // 空 addr 显式置空串，后端接受；首次心跳时 master 用 peer_ip + advertised port 自动填
+      await api.post("/api/nodes", { ...v, addr: v.addr?.trim() || "" });
       const tok = await api.post<Enrollment>(`/api/nodes/${v.id}/enrollment`);
       setEnrollment(tok);
       setAdding(false);
@@ -386,10 +387,9 @@ export default function Nodes() {
           <Form.Item
             name="addr"
             label="节点公网地址 (host:port)"
-            extra="其它节点连接它使用的地址。家宽节点填映射后的外网 IP"
-            rules={[{ required: true, message: "请输入节点地址" }]}
+            extra="可留空 — 节点首次心跳后自动从对端 IP 推断。仅家宽 / NAT 后节点需手填映射后的外网 IP"
           >
-            <Input placeholder="1.2.3.4:7444" className="num" />
+            <Input placeholder="留空自动识别，或填 1.2.3.4:7444" className="num" />
           </Form.Item>
           <Form.Item
             name="weight"
