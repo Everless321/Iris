@@ -118,7 +118,9 @@ function InstallDialog({
   const masterUrl = `${location.protocol}//${location.host}`;
   const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(location.host);
   const isInsecure = location.protocol === "http:" && !isLocal;
-  const cmd = `curl -fsSL ${masterUrl}/install.sh | bash -s -- \\
+  // 脚本本体直接从 GitHub raw 拉（HTTPS 自带签名 + 可缓存），
+  // master 的 /install.sh 只是 307 跳到这里，不必再绕一圈。
+  const cmd = `curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | bash -s -- \\
   --master ${masterUrl} \\
   --token ${enrollment.token}`;
 
