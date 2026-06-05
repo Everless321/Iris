@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Layout as AntLayout, Menu, Avatar, Dropdown, Tag, Space, theme } from "antd";
+import { Layout as AntLayout, Menu, Avatar, Dropdown, Tag, Space, theme, Tooltip } from "antd";
 import {
   DashboardOutlined,
   SwapOutlined,
@@ -10,9 +10,11 @@ import {
   AreaChartOutlined,
   LogoutOutlined,
   DownOutlined,
+  CloudSyncOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { useAuth } from "../lib/auth";
+import { api } from "../lib/api";
 
 const { Sider, Header, Content } = AntLayout;
 
@@ -32,11 +34,33 @@ function pageTitle(path: string): string {
   return "";
 }
 
+type UpdateCheck = {
+  current: string;
+  latest: string | null;
+  has_update: boolean;
+  error?: string;
+};
+
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const loc = useLocation();
   const { token } = theme.useToken();
+
+  // M9.1 master 自检更新：每 5 分钟拉一次（后端缓存也 5 分钟）。仅 admin 可见。
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheck | null>(null);
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    let aborted = false;
+    const check = () => {
+      api.get<UpdateCheck>("/api/master/update-check")
+        .then((d) => { if (!aborted) setUpdateInfo(d); })
+        .catch(() => { /* 静默：网络偶发 / GitHub rate limit */ });
+    };
+    check();
+    const t = setInterval(check, 5 * 60 * 1000);
+    return () => { aborted = true; clearInterval(t); };
+  }, [user?.role]);
 
   const menuItems = useMemo<MenuProps["items"]>(() => {
     const base = [
@@ -124,18 +148,35 @@ export default function Layout() {
           }}
         >
           <div style={{ fontSize: 15, fontWeight: 500 }}>{pageTitle(loc.pathname)}</div>
-          <Dropdown menu={{ items: userMenu }} placement="bottomRight">
-            <Space style={{ cursor: "pointer" }} size={8}>
-              <Avatar size={28} style={{ background: "#1677ff", fontSize: 12 }}>
-                {user?.username?.[0]?.toUpperCase()}
-              </Avatar>
-              <span style={{ fontSize: 13 }}>{user?.username}</span>
-              <Tag color={user?.role === "admin" ? "gold" : "blue"} style={{ margin: 0 }}>
-                {user?.role}
-              </Tag>
-              <DownOutlined style={{ fontSize: 10, color: "#999" }} />
-            </Space>
-          </Dropdown>
+          <Space size={12} align="center">
+            {updateInfo && (
+              updateInfo.has_update ? (
+                <Tooltip title={`新版本可用：${updateInfo.latest}（当前 ${updateInfo.current}）— SSH 运行 install.sh --upgrade-master`}>
+                  <Tag color="warning" icon={<CloudSyncOutlined />} style={{ margin: 0, cursor: "help" }}>
+                    可更新
+                  </Tag>
+                </Tooltip>
+              ) : updateInfo.latest ? (
+                <Tooltip title={`已是最新：${updateInfo.current}`}>
+                  <Tag color="success" style={{ margin: 0, cursor: "help", fontFamily: "monospace" }}>
+                    {updateInfo.current}
+                  </Tag>
+                </Tooltip>
+              ) : null
+            )}
+            <Dropdown menu={{ items: userMenu }} placement="bottomRight">
+              <Space style={{ cursor: "pointer" }} size={8}>
+                <Avatar size={28} style={{ background: "#1677ff", fontSize: 12 }}>
+                  {user?.username?.[0]?.toUpperCase()}
+                </Avatar>
+                <span style={{ fontSize: 13 }}>{user?.username}</span>
+                <Tag color={user?.role === "admin" ? "gold" : "blue"} style={{ margin: 0 }}>
+                  {user?.role}
+                </Tag>
+                <DownOutlined style={{ fontSize: 10, color: "#999" }} />
+              </Space>
+            </Dropdown>
+          </Space>
         </Header>
 
         <Content

@@ -127,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/install.sh", get(install_script))
         // M8 master 自身版本（节点 version 字段比对的"权威"参考）
         .route("/api/version", get(master_version))
+        // M9.1 master 自检更新（查 GitHub HEAD commit 与本地比对）
+        .route("/api/master/update-check", get(master_update_check))
         // M9 公开状态首页（无需登录）：komari 风格节点状态展示
         .route("/api/public/status", get(public_status))
         // 转发：customer 仅看/改自己；admin 全权
@@ -1127,6 +1129,63 @@ async fn public_status(State(s): State<AppState>) -> Result<Json<serde_json::Val
         "now": now,
         "nodes": items,
     })))
+}
+
+/// M9.1 master 自检更新：拉 GitHub `main` 最新 commit SHA 与本地 GIT_HASH 对比。
+/// 全局缓存 5 分钟避免 GitHub API rate limit（无 token 时 60/h）。
+static UPDATE_CHECK_CACHE: tokio::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>> =
+    tokio::sync::Mutex::const_new(None);
+
+async fn master_update_check(_: AdminClaims) -> Json<serde_json::Value> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+    {
+        let g = UPDATE_CHECK_CACHE.lock().await;
+        if let Some((cached, when)) = g.as_ref() {
+            if when.elapsed() < TTL {
+                return Json(cached.clone());
+            }
+        }
+    }
+    let current = iris_common::GIT_HASH.to_string();
+    let latest_short = fetch_github_head_short().await;
+    let result = match latest_short {
+        Some(latest) => serde_json::json!({
+            "current": current,
+            "latest": latest,
+            "has_update": current != latest && current != "unknown",
+            "checked_at": now_ms(),
+        }),
+        None => serde_json::json!({
+            "current": current,
+            "latest": null,
+            "has_update": false,
+            "error": "fetch GitHub failed",
+            "checked_at": now_ms(),
+        }),
+    };
+    *UPDATE_CHECK_CACHE.lock().await = Some((result.clone(), std::time::Instant::now()));
+    Json(result)
+}
+
+async fn fetch_github_head_short() -> Option<String> {
+    // 无 GitHub token 时 60 req/h —— 5min 缓存够用。
+    let out = tokio::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "-H", "Accept: application/vnd.github+json",
+            "-H", "User-Agent: iris-master",
+            "--max-time", "10",
+            "https://api.github.com/repos/Everless321/Iris/commits/main",
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let sha = v.get("sha")?.as_str()?;
+    Some(sha[..8].to_string())
 }
 
 /// M8 master 自报版本。UI 拿来作为"latest"参考，每个节点 version 与之比对显示
