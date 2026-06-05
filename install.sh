@@ -307,7 +307,11 @@ do_install() {
       warn "重装请先：curl ... | sudo bash -s -- --uninstall"
       exit 1
     fi
-    info "检测到镜像 baked binary（无 cert/.env） — 跳过 binary 下载，直接 enroll"
+    info "检测到 baked binary（无 cert/.env） — 拉取最新 release 覆盖，避免使用陈旧二进制"
+    # 旧 bug：直接 from_image=1 跳下载 → 重装机器（之前装过节点又 uninstall 没删 binary)
+    # 会一直跑几个月前的旧 binary，新字段（node_version / advertised_addr / M8 命令流）
+    # 全不发，UI 永远显示离线 + 无版本。统一覆盖一次解决。
+    download_binary "$INSTALL_DIR/iris-node"
     from_image=1
   fi
 
