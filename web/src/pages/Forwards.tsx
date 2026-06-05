@@ -78,6 +78,7 @@ export default function Forwards() {
     {
       title: "路径",
       key: "hops",
+      width: 240,
       render: (_, f) => <PathInline f={f} />,
     },
     {
@@ -157,6 +158,7 @@ export default function Forwards() {
           loading={list === null}
           dataSource={list ?? []}
           columns={columns}
+          scroll={{ x: "max-content" }}
           pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
           locale={{
             emptyText: (
