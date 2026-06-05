@@ -1,18 +1,23 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./lib/auth";
-import Layout from "./components/Layout";
-import Login from "./pages/Login";
-import Register from "./pages/Register";
-import Dashboard from "./pages/Dashboard";
-import Nodes from "./pages/Nodes";
-import Forwards from "./pages/Forwards";
-import ForwardDetail from "./pages/ForwardDetail";
-import TopologyEditor from "./pages/TopologyEditor";
-import Users from "./pages/Users";
-import Invites from "./pages/Invites";
-import SlaBoard from "./pages/SlaBoard";
+// StatusBoard 是公开首页，eager 加载（首屏即用）
 import StatusBoard from "./pages/StatusBoard";
+// 其余全部 lazy —— 游客访问 / 时不下载 admin/login 代码
+const Layout = lazy(() => import("./components/Layout"));
+const Login = lazy(() => import("./pages/Login"));
+const Register = lazy(() => import("./pages/Register"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Nodes = lazy(() => import("./pages/Nodes"));
+const Forwards = lazy(() => import("./pages/Forwards"));
+const ForwardDetail = lazy(() => import("./pages/ForwardDetail"));
+const TopologyEditor = lazy(() => import("./pages/TopologyEditor"));
+const Users = lazy(() => import("./pages/Users"));
+const Invites = lazy(() => import("./pages/Invites"));
+const SlaBoard = lazy(() => import("./pages/SlaBoard"));
+
+const fallback = <div style={{ padding: 32, color: "#888" }}>加载中…</div>;
+const lazyWrap = (el: React.ReactNode) => <Suspense fallback={fallback}>{el}</Suspense>;
 
 function Protected({ children, admin = false }: { children: React.ReactNode; admin?: boolean }) {
   const { user, loading } = useAuth();
@@ -41,8 +46,8 @@ export default function App() {
     <Routes>
       {/* M9 公开首页（无 auth）= 节点状态看板 */}
       <Route path="/" element={<StatusBoard />} />
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
+      <Route path="/login" element={lazyWrap(<Login />)} />
+      <Route path="/register" element={lazyWrap(<Register />)} />
       {/* 旧 URL 书签兼容：/forwards/26/edit → /admin/forwards/26/edit */}
       <Route path="/forwards/*" element={<LegacyRedirect to="/admin/forwards" />} />
       <Route path="/nodes/*" element={<LegacyRedirect to="/admin/nodes" />} />
@@ -54,20 +59,20 @@ export default function App() {
         path="/admin"
         element={
           <Protected>
-            <Layout />
+            {lazyWrap(<Layout />)}
           </Protected>
         }
       >
-        <Route index element={<Dashboard />} />
-        <Route path="forwards" element={<Forwards />} />
-        <Route path="forwards/new" element={<TopologyEditor />} />
-        <Route path="forwards/:id" element={<ForwardDetail />} />
-        <Route path="forwards/:id/edit" element={<TopologyEditor />} />
+        <Route index element={lazyWrap(<Dashboard />)} />
+        <Route path="forwards" element={lazyWrap(<Forwards />)} />
+        <Route path="forwards/new" element={lazyWrap(<TopologyEditor />)} />
+        <Route path="forwards/:id" element={lazyWrap(<ForwardDetail />)} />
+        <Route path="forwards/:id/edit" element={lazyWrap(<TopologyEditor />)} />
         <Route
           path="nodes"
           element={
             <Protected admin>
-              <Nodes />
+              {lazyWrap(<Nodes />)}
             </Protected>
           }
         />
@@ -75,7 +80,7 @@ export default function App() {
           path="users"
           element={
             <Protected admin>
-              <Users />
+              {lazyWrap(<Users />)}
             </Protected>
           }
         />
@@ -83,7 +88,7 @@ export default function App() {
           path="invites"
           element={
             <Protected admin>
-              <Invites />
+              {lazyWrap(<Invites />)}
             </Protected>
           }
         />
@@ -91,7 +96,7 @@ export default function App() {
           path="sla"
           element={
             <Protected admin>
-              <SlaBoard />
+              {lazyWrap(<SlaBoard />)}
             </Protected>
           }
         />
