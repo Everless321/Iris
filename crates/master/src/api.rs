@@ -1021,18 +1021,32 @@ async fn enroll_node(
     // 签发节点专属证书
     let (cert_pem, key_pem, ca_pem) =
         iris_common::sign_node_cert(&s.cert_dir, &node_id).map_err(err)?;
-    // 数据面端口提示
+    // 数据面端口提示：从 nodes.addr 提取端口；提取失败（addr 为空 / 没有 :port / port 非数字）
+    // 就退回默认 7444。旧 bug：addr="23.149.108.114" 没冒号时 rsplit 返回整串,
+    // 拼出 "0.0.0.0:23.149.108.114" 让节点 bind 直接报 "invalid socket address syntax"。
     let addr: Option<String> = sqlx::query_scalar("SELECT addr FROM nodes WHERE id=?")
         .bind(&node_id).fetch_optional(&s.pool).await.map_err(err)?;
     let data_addr_hint = addr
         .as_deref()
-        .and_then(|a| a.rsplit(':').next())
+        .and_then(|a| a.rsplit_once(':').map(|(_, p)| p))
+        .filter(|p| p.parse::<u16>().is_ok())
         .map(|port| format!("0.0.0.0:{port}"))
         .unwrap_or_else(|| "0.0.0.0:7444".into());
+    // master_grpc：env 优先；缺省时根据 Host header 推导（公网部署一般 master:gRPC 共 IP 不同端口）。
+    // 这样即使 IRIS_PUBLIC_GRPC 没配，节点拿到的仍是可达地址而不是 127.0.0.1。
+    // install.sh 实际不用这个字段（自己从 --master 推），但其它 enroll 客户端依赖。
+    let master_grpc = std::env::var("IRIS_PUBLIC_GRPC").unwrap_or_else(|_| {
+        let host = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| h.rsplit_once(':').map(|(host, _)| host).or(Some(h)))
+            .unwrap_or("127.0.0.1");
+        format!("https://{host}:7443")
+    });
     Ok(Json(EnrollResponse {
         node_id,
         ca_pem, cert_pem, key_pem,
-        master_grpc: std::env::var("IRIS_PUBLIC_GRPC").unwrap_or_else(|_| "https://127.0.0.1:7443".into()),
+        master_grpc,
         data_addr_hint,
     }))
 }
