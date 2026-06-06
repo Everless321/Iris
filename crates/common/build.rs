@@ -11,8 +11,14 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
+    // CI / 外部预先算好的 hash 通过此 env 注入 → 避免 build.rs 被 cargo 增量缓存
+    // 跳过造成 hash 卡死。本地构建若未设此 env，自己 git log 算。
+    println!("cargo:rerun-if-env-changed=IRIS_GIT_HASH");
 
-    let git_hash = relevant_code_hash().unwrap_or_else(|| "unknown".into());
+    let git_hash = std::env::var("IRIS_GIT_HASH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| relevant_code_hash().unwrap_or_else(|| "unknown".into()));
     println!("cargo:rustc-env=IRIS_GIT_HASH={git_hash}");
 
     // 编译时间戳，区分同 hash 不同构建。

@@ -54,6 +54,18 @@ jobs:
           key: musl-x86_64
           cache-on-failure: true
 
+      # 把 "最后改 node 相关代码的 commit hash" 计算在 workflow 层,
+      # 注入 env IRIS_GIT_HASH 让 build.rs 直接读 —— 绕开 rust-cache 缓存导致
+      # build.rs 不重跑的问题。仅 master/UI 改动时，IRIS_GIT_HASH 保持稳定,
+      # 节点 binary 版本就不会"假性 outdated"。
+      - name: Compute node-relevant git hash
+        id: nodehash
+        run: |
+          h=$(git log -1 --format=%h --abbrev=8 -- crates/node crates/common crates/proto)
+          [ -z "$h" ] && h=$(git rev-parse --short=8 HEAD)
+          echo "IRIS_GIT_HASH=$h" >> "$GITHUB_ENV"
+          echo "Computed IRIS_GIT_HASH=$h"
+
       - name: Build musl release
         env:
           RUSTFLAGS: -C target-feature=+crt-static
