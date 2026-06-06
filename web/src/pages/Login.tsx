@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Form, Input, Button, Card, Typography, App, Space } from "antd";
 import { LockOutlined, UserOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import { useAuth } from "../lib/auth";
@@ -94,9 +94,6 @@ export default function Login() {
               </Button>
             </Form.Item>
 
-            <Text type="secondary" style={{ display: "block", textAlign: "center", fontSize: 13 }}>
-              没有账号？<Link to="/register">用邀请码注册</Link>
-            </Text>
           </Form>
         </Card>
       </div>

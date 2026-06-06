@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Layout as AntLayout, Menu, Avatar, Dropdown, Tag, Space, theme, Tooltip, App } from "antd";
+import { Layout as AntLayout, Menu, Avatar, Dropdown, Tag, Space, theme, Tooltip, App, Modal, Form, Input } from "antd";
 import {
   DashboardOutlined,
   SwapOutlined,
   DatabaseOutlined,
   TeamOutlined,
-  TagsOutlined,
   AreaChartOutlined,
   NodeIndexOutlined,
   LogoutOutlined,
   DownOutlined,
   CloudSyncOutlined,
+  KeyOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { useAuth } from "../lib/auth";
@@ -25,7 +25,6 @@ const TITLES: Record<string, string> = {
   "/admin/forwards/new": "新建转发",
   "/admin/nodes": "节点管理",
   "/admin/users": "用户管理",
-  "/admin/invites": "邀请码",
   "/admin/sla": "SLA 看板",
   "/admin/latency-matrix": "节点延迟矩阵",
 };
@@ -127,7 +126,6 @@ export default function Layout() {
       base.push(
         { key: "/admin/nodes", icon: <DatabaseOutlined />, label: "节点" },
         { key: "/admin/users", icon: <TeamOutlined />, label: "用户" },
-        { key: "/admin/invites", icon: <TagsOutlined />, label: "邀请码" },
         { key: "/admin/sla", icon: <AreaChartOutlined />, label: "SLA 看板" },
         { key: "/admin/latency-matrix", icon: <NodeIndexOutlined />, label: "延迟矩阵" }
       );
@@ -135,7 +133,18 @@ export default function Layout() {
     return base;
   }, [user?.role]);
 
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwForm] = Form.useForm<{ old_password: string; new_password: string; confirm: string }>();
+
   const userMenu: MenuProps["items"] = [
+    {
+      key: "password",
+      icon: <KeyOutlined />,
+      label: "修改密码",
+      onClick: () => { pwForm.resetFields(); setPwOpen(true); },
+    },
+    { type: "divider" },
     {
       key: "logout",
       icon: <LogoutOutlined />,
@@ -146,6 +155,20 @@ export default function Layout() {
       },
     },
   ];
+
+  async function submitPassword() {
+    const v = await pwForm.validateFields();
+    setPwBusy(true);
+    try {
+      await api.post("/api/me/password", { old_password: v.old_password, new_password: v.new_password });
+      message.success("密码已更新");
+      setPwOpen(false);
+    } catch (e: unknown) {
+      message.error((e as Error)?.message || "修改失败");
+    } finally {
+      setPwBusy(false);
+    }
+  }
 
   // 选中项匹配
   const selectedKey = useMemo(() => {
@@ -251,6 +274,47 @@ export default function Layout() {
           <Outlet />
         </Content>
       </AntLayout>
+
+      <Modal
+        title="修改密码"
+        open={pwOpen}
+        onCancel={() => setPwOpen(false)}
+        onOk={submitPassword}
+        confirmLoading={pwBusy}
+        okText="提交"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={pwForm} layout="vertical" requiredMark={false} style={{ marginTop: 8 }}>
+          <Form.Item name="old_password" label="原密码" rules={[{ required: true, message: "请输入原密码" }]}>
+            <Input.Password autoComplete="current-password" />
+          </Form.Item>
+          <Form.Item
+            name="new_password"
+            label="新密码"
+            rules={[{ required: true, message: "请输入新密码" }, { min: 6, message: "至少 6 字符" }]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+          <Form.Item
+            name="confirm"
+            label="确认新密码"
+            dependencies={["new_password"]}
+            rules={[
+              { required: true, message: "请再次输入" },
+              ({ getFieldValue }) => ({
+                validator(_, v) {
+                  return !v || v === getFieldValue("new_password")
+                    ? Promise.resolve()
+                    : Promise.reject(new Error("两次输入不一致"));
+                },
+              }),
+            ]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </AntLayout>
   );
 }

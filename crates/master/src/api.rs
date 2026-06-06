@@ -110,6 +110,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
         .route("/api/me", get(me))
+        .route("/api/me/password", post(change_my_password))
         // 节点：admin only
         .route("/api/nodes", get(list_nodes).post(create_node))
         .route("/api/nodes/:id", axum::routing::delete(delete_node))
@@ -271,6 +272,34 @@ async fn me(claims: Claims) -> Json<Value> {
         "username": claims.username,
         "role": claims.role,
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordReq {
+    old_password: String,
+    new_password: String,
+}
+
+async fn change_my_password(
+    claims: Claims,
+    State(s): State<AppState>,
+    Json(r): Json<ChangePasswordReq>,
+) -> Result<Json<Value>, ApiErr> {
+    if r.new_password.len() < 6 {
+        return Err(bad("新密码至少 6 字符"));
+    }
+    let u = sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE id=?")
+        .bind(claims.sub)
+        .fetch_optional(&s.pool).await.map_err(err)?
+        .ok_or((StatusCode::UNAUTHORIZED, "用户不存在".into()))?;
+    if !verify_password(&r.old_password, &u.password_hash) {
+        return Err((StatusCode::UNAUTHORIZED, "原密码错误".into()));
+    }
+    let hash = hash_password(&r.new_password).map_err(err)?;
+    sqlx::query("UPDATE users SET password_hash=?, updated_at=? WHERE id=?")
+        .bind(&hash).bind(now_ms()).bind(claims.sub)
+        .execute(&s.pool).await.map_err(err)?;
+    Ok(Json(json!({"ok": true})))
 }
 
 // ---- 节点：admin only ----
