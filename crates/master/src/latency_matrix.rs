@@ -72,6 +72,20 @@ impl LatencyMatrix {
         g.retain(|(f, t), _| f != node_id && t != node_id);
     }
 
+    /// 导出全量矩阵 (仅未过期边)，给 admin API 展示用。
+    /// 返回 {from: {to: rtt_ms}}。
+    pub fn dump(&self) -> HashMap<String, HashMap<String, u32>> {
+        let now = Instant::now();
+        let g = self.edges.read().unwrap();
+        let mut out: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        for ((from, to), e) in g.iter() {
+            if now.duration_since(e.updated_at) <= self.ttl {
+                out.entry(from.clone()).or_default().insert(to.clone(), e.rtt_ms);
+            }
+        }
+        out
+    }
+
     /// 全表 GC，按 TTL 清陈旧边。后台周期任务调用即可。
     pub fn gc(&self) -> usize {
         let now = Instant::now();

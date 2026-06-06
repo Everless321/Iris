@@ -1,7 +1,10 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
+
+use crate::latency_matrix::LatencyMatrix;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -10,25 +13,36 @@ fn now_ms() -> i64 {
 }
 
 /// 后台探测调度器：周期对每个节点 TCP 探测，更新健康/延迟/SLA 统计。
-pub fn spawn(pool: SqlitePool, interval_secs: u64, fail_threshold: i64) {
+/// M9.2：节点首次转 unhealthy 时同步 drop 矩阵相关行（否则等 60s TTL）。
+pub fn spawn(
+    pool: SqlitePool,
+    interval_secs: u64,
+    fail_threshold: i64,
+    matrix: Arc<LatencyMatrix>,
+) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
         tracing::info!(interval_secs, fail_threshold, "probe scheduler started");
         loop {
             tick.tick().await;
-            if let Err(e) = probe_round(&pool, fail_threshold).await {
+            if let Err(e) = probe_round(&pool, fail_threshold, &matrix).await {
                 tracing::error!(error = %e, "probe round failed");
             }
         }
     });
 }
 
-async fn probe_round(pool: &SqlitePool, fail_threshold: i64) -> Result<()> {
+async fn probe_round(
+    pool: &SqlitePool,
+    fail_threshold: i64,
+    matrix: &Arc<LatencyMatrix>,
+) -> Result<()> {
     let nodes: Vec<(String, String)> =
         sqlx::query_as("SELECT id, addr FROM nodes").fetch_all(pool).await?;
     let mut tasks = Vec::new();
     for (id, addr) in nodes {
         let pool = pool.clone();
+        let matrix = matrix.clone();
         tasks.push(tokio::spawn(async move {
             let start = Instant::now();
             let ok = matches!(
@@ -36,8 +50,14 @@ async fn probe_round(pool: &SqlitePool, fail_threshold: i64) -> Result<()> {
                 Ok(Ok(_))
             );
             let rtt = start.elapsed().as_millis() as i64;
-            if let Err(e) = update_probe(&pool, &id, ok, rtt, fail_threshold).await {
-                tracing::warn!(node = %id, error = %e, "update probe failed");
+            match update_probe(&pool, &id, ok, rtt, fail_threshold).await {
+                Ok(true) => {
+                    // 本次刚转 unhealthy，立刻清矩阵相关边
+                    matrix.drop_node(&id);
+                    tracing::info!(node = %id, "dropped latency-matrix edges (unhealthy)");
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(node = %id, error = %e, "update probe failed"),
             }
         }));
     }
@@ -47,13 +67,14 @@ async fn probe_round(pool: &SqlitePool, fail_threshold: i64) -> Result<()> {
     Ok(())
 }
 
+/// 返回 true 表示「本轮节点刚转 unhealthy」，调用方据此触发矩阵清理。
 async fn update_probe(
     pool: &SqlitePool,
     id: &str,
     ok: bool,
     rtt: i64,
     fail_threshold: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let now = now_ms();
     // 写入探测样本（每节点保留最近 240 条 = 近 1 小时 @ 15s 间隔）
     sqlx::query("INSERT INTO probe_samples (node_id, ts, ok, latency_ms) VALUES (?,?,?,?)")
@@ -98,6 +119,7 @@ async fn update_probe(
         .bind(id)
         .execute(pool)
         .await?;
+        return Ok(false);
     } else {
         let new_fail = fail_count + 1;
         let newly_down = new_fail >= fail_threshold && health != "unhealthy";
@@ -112,6 +134,7 @@ async fn update_probe(
             .bind(id)
             .execute(pool)
             .await?;
+            return Ok(true);
         } else {
             // 探测失败本次无延迟数据，清空避免显示过期值
             sqlx::query(
@@ -123,5 +146,5 @@ async fn update_probe(
             .await?;
         }
     }
-    Ok(())
+    Ok(false)
 }

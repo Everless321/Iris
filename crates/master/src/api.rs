@@ -57,6 +57,8 @@ pub struct AppState {
     pub command_routers: CommandRouters,
     /// M8 命令进度 SSE 广播：节点 AckCommand 后推给 UI 订阅者。
     pub commands_tx: broadcast::Sender<CommandProgress>,
+    /// M9.2 节点间延迟矩阵（与 ControlSvc 共享同一 Arc）。
+    pub latency_matrix: Arc<crate::latency_matrix::LatencyMatrix>,
 }
 
 /// M8 命令路由表类型别名（多模块共享）。
@@ -152,6 +154,8 @@ pub fn router(state: AppState) -> Router {
         // SLA / 监控
         .route("/api/sla", get(sla))
         .route("/api/sla/samples", get(sla_samples))
+        // M9.2 节点间延迟矩阵 admin 查询
+        .route("/api/latency-matrix", get(latency_matrix))
         .route("/metrics", get(metrics))
         .route("/healthz", get(|| async { "ok" }))
         // 前端静态资源：SPA 兜底，必须放在所有 /api/* 之后
@@ -322,7 +326,9 @@ async fn delete_node(
             format!("还有 {} 条转发引用该节点：{}", refs.len(), names.join(", ")),
         ));
     }
-    sqlx::query("DELETE FROM nodes WHERE id=?").bind(id).execute(&s.pool).await.map_err(err)?;
+    sqlx::query("DELETE FROM nodes WHERE id=?").bind(&id).execute(&s.pool).await.map_err(err)?;
+    // M9.2 立即清理矩阵中与该节点相关的所有边（否则等 60s TTL）。
+    s.latency_matrix.drop_node(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1474,6 +1480,27 @@ async fn list_users(_: AdminClaims, State(s): State<AppState>) -> Result<Json<Ve
 
 fn uptime(n: &Node) -> f64 {
     if n.probe_total > 0 { n.probe_ok as f64 / n.probe_total as f64 } else { 0.0 }
+}
+
+/// M9.2 节点间延迟矩阵（admin 查询）。
+/// 返回 {nodes:[...], matrix:{from:{to:rtt_ms}}, ttl_secs}。
+/// 仅含未过期样本；某行缺失 = 该节点未上报或全离线。
+async fn latency_matrix(
+    _: AdminClaims,
+    State(s): State<AppState>,
+) -> Result<Json<Value>, ApiErr> {
+    let nodes: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, name FROM nodes ORDER BY id")
+            .fetch_all(&s.pool).await.map_err(err)?;
+    let dump = s.latency_matrix.dump();
+    let node_list: Vec<Value> = nodes.iter().map(|(id, name)| {
+        json!({"id": id, "name": name})
+    }).collect();
+    Ok(Json(json!({
+        "nodes": node_list,
+        "matrix": dump,
+        "ttl_secs": 60,
+    })))
 }
 
 async fn sla(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {

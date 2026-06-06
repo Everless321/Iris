@@ -15,6 +15,7 @@ const TopologyEditor = lazy(() => import("./pages/TopologyEditor"));
 const Users = lazy(() => import("./pages/Users"));
 const Invites = lazy(() => import("./pages/Invites"));
 const SlaBoard = lazy(() => import("./pages/SlaBoard"));
+const LatencyMatrix = lazy(() => import("./pages/LatencyMatrix"));
 
 const fallback = <div style={{ padding: 32, color: "#888" }}>加载中…</div>;
 const lazyWrap = (el: React.ReactNode) => <Suspense fallback={fallback}>{el}</Suspense>;
@@ -97,6 +98,14 @@ export default function App() {
           element={
             <Protected admin>
               {lazyWrap(<SlaBoard />)}
+            </Protected>
+          }
+        />
+        <Route
+          path="latency-matrix"
+          element={
+            <Protected admin>
+              {lazyWrap(<LatencyMatrix />)}
             </Protected>
           }
         />

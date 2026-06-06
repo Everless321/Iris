@@ -983,8 +983,24 @@ async fn main() -> Result<()> {
         }
     }
 
+    // M9.2 节点间延迟矩阵（内存，TTL 60s）。控制面 + API + probe 共享同一实例。
+    let latency_matrix = Arc::new(latency_matrix::LatencyMatrix::new(
+        std::time::Duration::from_secs(60),
+    ));
+    {
+        let lm = latency_matrix.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let _ = lm.gc();
+            }
+        });
+    }
+
     // 健康探测调度器
-    probe::spawn(pool.clone(), probe_interval(), fail_threshold());
+    probe::spawn(pool.clone(), probe_interval(), fail_threshold(), latency_matrix.clone());
 
     // #36 session retention cron：每 1h 跑一次。两个 env 默认 0 = 永久不归档。
     {
@@ -1097,6 +1113,7 @@ async fn main() -> Result<()> {
         metrics_sse_tickets,
         command_routers: command_routers.clone(),
         commands_tx: commands_tx.clone(),
+        latency_matrix: latency_matrix.clone(),
     });
     let http_listener = tokio::net::TcpListener::bind(http_addr()).await?;
     tracing::info!(addr = %http_addr(), "http api listening");
@@ -1118,20 +1135,6 @@ async fn main() -> Result<()> {
     let tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(client_ca);
-    let latency_matrix = Arc::new(latency_matrix::LatencyMatrix::new(
-        std::time::Duration::from_secs(60),
-    ));
-    {
-        let lm = latency_matrix.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-            tick.tick().await; // skip immediate fire
-            loop {
-                tick.tick().await;
-                let _ = lm.gc();
-            }
-        });
-    }
     let svc = ControlSvc {
         pool,
         listener_states: listener_states.clone(),

@@ -8,6 +8,7 @@ import {
   TeamOutlined,
   TagsOutlined,
   AreaChartOutlined,
+  NodeIndexOutlined,
   LogoutOutlined,
   DownOutlined,
   CloudSyncOutlined,
@@ -26,6 +27,7 @@ const TITLES: Record<string, string> = {
   "/admin/users": "用户管理",
   "/admin/invites": "邀请码",
   "/admin/sla": "SLA 看板",
+  "/admin/latency-matrix": "节点延迟矩阵",
 };
 
 function pageTitle(path: string): string {
@@ -123,7 +125,8 @@ export default function Layout() {
         { key: "/admin/nodes", icon: <DatabaseOutlined />, label: "节点" },
         { key: "/admin/users", icon: <TeamOutlined />, label: "用户" },
         { key: "/admin/invites", icon: <TagsOutlined />, label: "邀请码" },
-        { key: "/admin/sla", icon: <AreaChartOutlined />, label: "SLA 看板" }
+        { key: "/admin/sla", icon: <AreaChartOutlined />, label: "SLA 看板" },
+        { key: "/admin/latency-matrix", icon: <NodeIndexOutlined />, label: "延迟矩阵" }
       );
     }
     return base;
