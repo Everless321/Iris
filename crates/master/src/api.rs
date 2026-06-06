@@ -129,6 +129,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/version", get(master_version))
         // M9.1 master 自检更新（查 GitHub HEAD commit 与本地比对）
         .route("/api/master/update-check", get(master_update_check))
+        // M9.2 master 一键自升级：fork detached install.sh --upgrade-master
+        .route("/api/master/upgrade", post(master_self_upgrade))
         // M9 公开状态首页（无需登录）：komari 风格节点状态展示
         .route("/api/public/status", get(public_status))
         // 转发：customer 仅看/改自己；admin 全权
@@ -1186,6 +1188,48 @@ async fn fetch_github_head_short() -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let sha = v.get("sha")?.as_str()?;
     Some(sha[..8].to_string())
+}
+
+/// M9.2 master 一键自升级：fork detached install.sh --upgrade-master
+/// 流程：1) 写 upgrade 日志文件 → 2) setsid+nohup 后台跑 install.sh → 3) 立即返回 202
+/// install.sh 内部会 stop 自己 + 替换 binary + start —— systemd 接管,
+/// UI 端轮询 /api/version 直到 git_hash 变化 = 升级完成。
+async fn master_self_upgrade(_: AdminClaims) -> Result<Json<serde_json::Value>, ApiErr> {
+    use std::process::Stdio;
+    // 防并发：若 .master-upgrade.lock 存在且新于 10 分钟，拒绝
+    let lock_path = "/opt/iris/.master-upgrade.lock";
+    if let Ok(meta) = std::fs::metadata(lock_path) {
+        if let Ok(mtime) = meta.modified() {
+            if mtime.elapsed().map(|d| d.as_secs() < 600).unwrap_or(false) {
+                return Err((StatusCode::CONFLICT, "升级已在进行中（10 分钟内）".into()));
+            }
+        }
+    }
+    let _ = std::fs::write(lock_path, format!("started_at={}", now_ms()));
+
+    // setsid 让子进程脱离父进程的 session：父进程被 systemctl stop 时不会带走子进程。
+    // nohup 屏蔽 SIGHUP。stdout/err 重定向到日志文件供事后排查。
+    let log_path = "/opt/iris/.master-upgrade.log";
+    let _ = std::fs::write(log_path, format!("# triggered_at={}\n", now_ms()));
+
+    let cmd = format!(
+        "setsid nohup bash -c 'sleep 1; curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | bash -s -- --upgrade-master; rm -f {lock_path}' >> {log_path} 2>&1 < /dev/null &"
+    );
+    std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn 升级进程失败：{e}")))?;
+
+    tracing::warn!("master self-upgrade triggered");
+    Ok(Json(serde_json::json!({
+        "status": "started",
+        "message": "升级已触发；master 服务将在数秒内重启",
+        "log_path": log_path,
+    })))
 }
 
 /// M8 master 自报版本。UI 拿来作为"latest"参考，每个节点 version 与之比对显示

@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod db;
+mod latency_matrix;
 mod models;
 mod probe;
 mod ratelimit;
@@ -362,6 +363,8 @@ struct ControlSvc {
     metrics_tx: tokio::sync::broadcast::Sender<api::MetricsBroadcast>,
     /// entry_forward_ids 的 fail-close 兜底：DB 抖动时用 cached allowlist 继续 enforce。
     allowlist_cache: AllowlistCache,
+    /// M9.2 节点间延迟矩阵（内存，TTL 60s）。heartbeat 写入 from 行，sync_config 按调用方查 row。
+    latency_matrix: Arc<latency_matrix::LatencyMatrix>,
     /// M8 远程命令推送：节点 id → mpsc::Sender。节点开 Commands stream 时注册 tx。
     /// API 层调 enqueue_command(node_id) 拿到 tx 推 Command。节点断流时下次 send 会失败,
     /// 上层据此判定"节点离线"。
@@ -672,6 +675,10 @@ impl Control for ControlSvc {
             // #39 累加完 delta 后立刻 quota check，超额 forward 在下一轮 sync_config 被节点 reconcile 软停。
             quota_check_and_exhaust(&self.pool, &touched_forwards).await;
         }
+        // M9.2 节点视角邻居延迟。空 = 老节点未启用 / 探测未到首轮，不动矩阵。
+        if !r.neighbor_rtt_ms.is_empty() {
+            self.latency_matrix.record_row(&r.node_id, &r.neighbor_rtt_ms);
+        }
         Ok(Response::new(HeartbeatReply {
             server_time: now_ms(),
             message: format!("ack seq={}", r.seq),
@@ -758,20 +765,27 @@ impl Control for ControlSvc {
             })
             .collect();
 
-        let nodes = sqlx::query_as::<_, (String, String, String, Option<i64>)>(
-            "SELECT id, addr, health, latency_ms FROM nodes",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?
-        .into_iter()
-        .map(|(id, addr, health, latency)| NodeAddr {
-            id,
-            addr,
-            health,
-            latency_ms: latency.unwrap_or(0) as u32,
-        })
-        .collect();
+        let raw_nodes: Vec<(String, String, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, addr, health, latency_ms FROM nodes")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        // M9.2：以调用方 cn_node 为原点查矩阵行，命中则覆盖 DB 的 control-plane 延迟。
+        let to_ids: Vec<String> = raw_nodes.iter().map(|(id, _, _, _)| id.clone()).collect();
+        let row = self.latency_matrix.row(&cn_node, &to_ids);
+        let nodes = raw_nodes
+            .into_iter()
+            .map(|(id, addr, health, latency)| {
+                let latency_ms = if id == cn_node {
+                    0
+                } else if let Some(rtt) = row.get(&id) {
+                    *rtt
+                } else {
+                    latency.unwrap_or(0) as u32
+                };
+                NodeAddr { id, addr, health, latency_ms }
+            })
+            .collect();
 
         Ok(Response::new(SyncReply { forwards, nodes }))
     }
@@ -1104,6 +1118,20 @@ async fn main() -> Result<()> {
     let tls = ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(client_ca);
+    let latency_matrix = Arc::new(latency_matrix::LatencyMatrix::new(
+        std::time::Duration::from_secs(60),
+    ));
+    {
+        let lm = latency_matrix.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.tick().await; // skip immediate fire
+            loop {
+                tick.tick().await;
+                let _ = lm.gc();
+            }
+        });
+    }
     let svc = ControlSvc {
         pool,
         listener_states: listener_states.clone(),
@@ -1112,6 +1140,7 @@ async fn main() -> Result<()> {
         sessions_tx,
         metrics_tx,
         allowlist_cache: Arc::new(RwLock::new(HashMap::new())),
+        latency_matrix,
         command_routers,
         commands_tx,
     };

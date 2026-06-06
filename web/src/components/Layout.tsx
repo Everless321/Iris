@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Layout as AntLayout, Menu, Avatar, Dropdown, Tag, Space, theme, Tooltip } from "antd";
+import { Layout as AntLayout, Menu, Avatar, Dropdown, Tag, Space, theme, Tooltip, App } from "antd";
 import {
   DashboardOutlined,
   SwapOutlined,
@@ -43,12 +43,14 @@ type UpdateCheck = {
 
 export default function Layout() {
   const { user, logout } = useAuth();
+  const { message, modal } = App.useApp();
   const navigate = useNavigate();
   const loc = useLocation();
   const { token } = theme.useToken();
 
   // M9.1 master 自检更新：每 5 分钟拉一次（后端缓存也 5 分钟）。仅 admin 可见。
   const [updateInfo, setUpdateInfo] = useState<UpdateCheck | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
   useEffect(() => {
     if (user?.role !== "admin") return;
     let aborted = false;
@@ -61,6 +63,55 @@ export default function Layout() {
     const t = setInterval(check, 5 * 60 * 1000);
     return () => { aborted = true; clearInterval(t); };
   }, [user?.role]);
+
+  // M9.2 一键升级 master：fork detached install.sh，等 master 重启后页面自动 reload
+  function triggerMasterUpgrade() {
+    modal.confirm({
+      title: "升级 master",
+      content: (
+        <div>
+          <p>当前：<code>{updateInfo?.current}</code></p>
+          <p>最新：<code>{updateInfo?.latest}</code></p>
+          <p style={{ color: "#faad14", marginTop: 12 }}>
+            ⚠ 升级期间 master 服务会重启约 5-10 秒，节点 gRPC 连接将短暂断开后自动重连。
+          </p>
+        </div>
+      ),
+      okText: "立即升级",
+      cancelText: "取消",
+      onOk: async () => {
+        setUpgrading(true);
+        try {
+          await api.post("/api/master/upgrade");
+          message.info("升级已触发，等待 master 重启...");
+          // 轮询 /api/version 直到 git_hash 变化
+          const start = Date.now();
+          const targetHash = updateInfo?.latest;
+          const poll = setInterval(async () => {
+            try {
+              const v = await api.get<{ git_hash: string }>("/api/version");
+              if (targetHash && v.git_hash === targetHash) {
+                clearInterval(poll);
+                setUpgrading(false);
+                message.success("✅ 升级完成，刷新页面");
+                setTimeout(() => location.reload(), 1500);
+              }
+            } catch {
+              // master 重启中，连不上，正常
+            }
+            if (Date.now() - start > 120000) {
+              clearInterval(poll);
+              setUpgrading(false);
+              message.warning("升级超过 2 分钟仍未生效，请检查 /opt/iris/.master-upgrade.log");
+            }
+          }, 2000);
+        } catch (e: unknown) {
+          setUpgrading(false);
+          message.error((e as Error)?.message || "升级触发失败");
+        }
+      },
+    });
+  }
 
   const menuItems = useMemo<MenuProps["items"]>(() => {
     const base = [
@@ -151,9 +202,14 @@ export default function Layout() {
           <Space size={12} align="center">
             {updateInfo && (
               updateInfo.has_update ? (
-                <Tooltip title={`新版本可用：${updateInfo.latest}（当前 ${updateInfo.current}）— SSH 运行 install.sh --upgrade-master`}>
-                  <Tag color="warning" icon={<CloudSyncOutlined />} style={{ margin: 0, cursor: "help" }}>
-                    可更新
+                <Tooltip title={upgrading ? "升级进行中..." : `点击升级 master 到 ${updateInfo.latest}（当前 ${updateInfo.current}）`}>
+                  <Tag
+                    color={upgrading ? "processing" : "warning"}
+                    icon={<CloudSyncOutlined spin={upgrading} />}
+                    style={{ margin: 0, cursor: upgrading ? "wait" : "pointer" }}
+                    onClick={!upgrading ? triggerMasterUpgrade : undefined}
+                  >
+                    {upgrading ? "升级中..." : "可更新"}
                   </Tag>
                 </Tooltip>
               ) : updateInfo.latest ? (

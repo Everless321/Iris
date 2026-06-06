@@ -91,6 +91,12 @@ message HeartbeatRequest {
   // M8 节点 binary 版本字符串："0.1.0-<git short hash>"。编译时注入。
   // 空 = 老节点未上报；master UI 用于比对 latest 标识"过期"。
   string node_version = 11;
+  // M9.2 节点到邻居的实测 RTT（毫秒，EWMA 平滑后值）。key = 邻居 node_id。
+  // 节点周期对所有非自己邻居 TCP connect 测延迟，每次心跳上报本视角的一行。
+  // master 聚合成 N×N 矩阵后，在 sync_config 下发时按调用方改写 NodeAddr.latency_ms,
+  // 让 latency 策略选路用「以入口节点为原点」的真实 RTT。
+  // 空 map = 老节点 / 探测未启动，master 不更新该 from 节点的行。
+  map<string, uint32> neighbor_rtt_ms = 12;
 }
 
 // M7 节点资源指标。静态字段（cpu_name, cores, os 等）随心跳重复发送以容忍 master 重启。
