@@ -1154,7 +1154,9 @@ async fn master_update_check(_: AdminClaims) -> Json<serde_json::Value> {
             }
         }
     }
-    let current = iris_common::GIT_HASH.to_string();
+    // 用 MASTER_HEAD_HASH 对比 GitHub HEAD —— 两边都是真 HEAD short，可比对。
+    // GIT_HASH 是 node-filtered，对 master 自更新无意义。
+    let current = iris_common::MASTER_HEAD_HASH.to_string();
     let latest_short = fetch_github_head_short().await;
     let result = match latest_short {
         Some(latest) => serde_json::json!({
@@ -1196,6 +1198,11 @@ async fn fetch_github_head_short() -> Option<String> {
     Some(sha[..8].to_string())
 }
 
+/// 单引号包裹 + 内部单引号 escape，安全传给 `bash -c`。
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// M9.2 master 一键自升级：fork detached install.sh --upgrade-master
 /// 流程：1) 写 upgrade 日志文件 → 2) setsid+nohup 后台跑 install.sh → 3) 立即返回 202
 /// install.sh 内部会 stop 自己 + 替换 binary + start —— systemd 接管,
@@ -1213,13 +1220,25 @@ async fn master_self_upgrade(_: AdminClaims) -> Result<Json<serde_json::Value>, 
     }
     let _ = std::fs::write(lock_path, format!("started_at={}", now_ms()));
 
-    // setsid 让子进程脱离父进程的 session：父进程被 systemctl stop 时不会带走子进程。
-    // nohup 屏蔽 SIGHUP。stdout/err 重定向到日志文件供事后排查。
+    // 关键：必须用 systemd-run --scope 让升级跑在独立 cgroup，否则
+    // 'systemctl stop iris-master' 会整族 kill 包括 install.sh。
+    // setsid 只解 session 不解 cgroup —— 之前第一版踩坑：install.sh 跑到
+    // stop 那行就被 systemd 整树 kill，binary 没换 → master 死循环不起。
+    // fallback：systemd-run 不可用时退到 setsid + nohup（聊胜于无）。
     let log_path = "/opt/iris/.master-upgrade.log";
     let _ = std::fs::write(log_path, format!("# triggered_at={}\n", now_ms()));
 
+    let inner = format!(
+        "sleep 1; curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | bash -s -- --upgrade-master; rm -f {lock_path}"
+    );
     let cmd = format!(
-        "setsid nohup bash -c 'sleep 1; curl -fsSL https://raw.githubusercontent.com/Everless321/Iris/main/install.sh | bash -s -- --upgrade-master; rm -f {lock_path}' >> {log_path} 2>&1 < /dev/null &"
+        "if command -v systemd-run >/dev/null 2>&1; then \
+            systemd-run --no-block --scope --unit=iris-master-upgrade-$$ --slice=system.slice \
+              bash -c {inner_q} >> {log_path} 2>&1 < /dev/null; \
+         else \
+            setsid nohup bash -c {inner_q} >> {log_path} 2>&1 < /dev/null & \
+         fi",
+        inner_q = shell_quote(&inner)
     );
     std::process::Command::new("bash")
         .arg("-c")
@@ -1245,6 +1264,8 @@ async fn master_version() -> Json<serde_json::Value> {
         "version": iris_common::version_string(),
         "pkg_version": iris_common::PKG_VERSION,
         "git_hash": iris_common::GIT_HASH,
+        // master 真 HEAD hash —— UI 升级轮询用此字段判定是否完成
+        "master_hash": iris_common::MASTER_HEAD_HASH,
         "build_ts": iris_common::BUILD_TS,
     }))
 }

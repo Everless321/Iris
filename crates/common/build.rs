@@ -21,6 +21,14 @@ fn main() {
         .unwrap_or_else(|| relevant_code_hash().unwrap_or_else(|| "unknown".into()));
     println!("cargo:rustc-env=IRIS_GIT_HASH={git_hash}");
 
+    // 真 HEAD short hash（每次 commit 必滚），用于 master 自更新对比。
+    println!("cargo:rerun-if-env-changed=IRIS_MASTER_HEAD_HASH");
+    let master_head = std::env::var("IRIS_MASTER_HEAD_HASH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| git_short(&["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| "unknown".into()));
+    println!("cargo:rustc-env=IRIS_MASTER_HEAD_HASH={master_head}");
+
     // 编译时间戳，区分同 hash 不同构建。
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

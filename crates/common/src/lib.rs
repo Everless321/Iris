@@ -180,8 +180,14 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// 编译时注入的 git short hash（8 字符）。`unknown` 表示非 git 仓库 / shallow clone。
+/// 编译时注入的 git short hash（8 字符）— 过滤版，仅 node/common/proto 变化才滚。
+/// 节点版本上报使用此值，避免 UI/master-only 改动让所有节点显示 outdated。
+/// `unknown` 表示非 git 仓库 / shallow clone。
 pub const GIT_HASH: &str = env!("IRIS_GIT_HASH");
+
+/// 真 HEAD short hash（每次提交必滚）。master 自更新轮询用此 hash 与 GitHub HEAD 比对,
+/// 区别于 GIT_HASH（被 node 过滤逻辑用），两者语义独立。
+pub const MASTER_HEAD_HASH: &str = env!("IRIS_MASTER_HEAD_HASH");
 
 /// Cargo.toml workspace 版本号（如 "0.1.0"）。
 pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");

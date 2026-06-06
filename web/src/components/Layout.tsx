@@ -91,8 +91,11 @@ export default function Layout() {
           const targetHash = updateInfo?.latest;
           const poll = setInterval(async () => {
             try {
-              const v = await api.get<{ git_hash: string }>("/api/version");
-              if (targetHash && v.git_hash === targetHash) {
+              // master_hash 是真 HEAD short（每次 commit 必滚），可对比 update-check.latest。
+              // git_hash 是 node-filtered，UI/master-only 改动时不滚，永远等不到。
+              const v = await api.get<{ master_hash?: string; git_hash: string }>("/api/version");
+              const cur = v.master_hash ?? v.git_hash; // 老 master 回退
+              if (targetHash && cur === targetHash) {
                 clearInterval(poll);
                 setUpgrading(false);
                 message.success("✅ 升级完成，刷新页面");

@@ -65,6 +65,9 @@ jobs:
           [ -z "$h" ] && h=$(git rev-parse --short=8 HEAD)
           echo "IRIS_GIT_HASH=$h" >> "$GITHUB_ENV"
           echo "Computed IRIS_GIT_HASH=$h"
+          mh=$(git rev-parse --short=8 HEAD)
+          echo "IRIS_MASTER_HEAD_HASH=$mh" >> "$GITHUB_ENV"
+          echo "Computed IRIS_MASTER_HEAD_HASH=$mh"
 
       - name: Build musl release
         env:
