@@ -6,7 +6,7 @@ import {
 import {
   PlusOutlined, DeleteOutlined, ReloadOutlined, CopyOutlined,
   CheckCircleFilled, MinusCircleFilled, QuestionCircleFilled,
-  DashboardOutlined, CloudUploadOutlined,
+  DashboardOutlined, CloudUploadOutlined, EditOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { api, type Enrollment, type Node } from "../lib/api";
@@ -200,6 +200,8 @@ export default function Nodes() {
   const [busy, setBusy] = useState(false);
   const [metricsNodeId, setMetricsNodeId] = useState<string | null>(null);
   const [upgradeNodeId, setUpgradeNodeId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Node | null>(null);
+  const [editForm] = Form.useForm<{ name: string; addr: string; weight: number }>();
   const [masterVersion, setMasterVersion] = useState<string | null>(null);
   const { message } = App.useApp();
 
@@ -242,6 +244,31 @@ export default function Nodes() {
     }
   }
 
+  function openEdit(n: Node) {
+    editForm.setFieldsValue({ name: n.name, addr: n.addr, weight: n.weight });
+    setEditing(n);
+  }
+
+  async function onEditOk() {
+    if (!editing) return;
+    const v = await editForm.validateFields();
+    setBusy(true);
+    try {
+      await api.patch(`/api/nodes/${editing.id}`, {
+        name: v.name.trim(),
+        addr: v.addr?.trim() ?? "",
+        weight: v.weight,
+      });
+      message.success("已更新");
+      setEditing(null);
+      load();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onDel(id: string) {
     try {
       await api.del(`/api/nodes/${id}`);
@@ -277,12 +304,17 @@ export default function Nodes() {
       render: (_, n) => <VersionBadge nodeVer={n.version} masterVer={masterVersion} />,
     },
     {
-      title: "操作", key: "actions", width: 280, align: "right", fixed: "right",
+      title: "操作", key: "actions", width: 340, align: "right", fixed: "right",
       render: (_, n) => (
         <Space size={4}>
           <Tooltip title="查看 CPU/内存/磁盘/网速 实时监控">
             <Button type="link" size="small" icon={<DashboardOutlined />} onClick={() => setMetricsNodeId(n.id)}>
               监控
+            </Button>
+          </Tooltip>
+          <Tooltip title="修改名称 / 地址 / 权重">
+            <Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEdit(n)}>
+              编辑
             </Button>
           </Tooltip>
           <Popconfirm
@@ -366,6 +398,35 @@ export default function Nodes() {
           />
         )}
       </Card>
+
+      {/* 编辑节点 Modal */}
+      <Modal
+        open={!!editing}
+        onCancel={() => setEditing(null)}
+        title={editing ? `编辑节点 ${editing.id}` : "编辑节点"}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={busy}
+        onOk={onEditOk}
+        destroyOnClose
+        width={520}
+      >
+        <Form form={editForm} layout="vertical" requiredMark={false}>
+          <Form.Item
+            name="name"
+            label="节点名称"
+            rules={[{ required: true, message: "请输入名称" }]}
+          >
+            <Input placeholder="香港-1" />
+          </Form.Item>
+          <Form.Item name="addr" label="公网地址" extra="留空则首次心跳时自动填">
+            <Input placeholder="1.2.3.4:7445" className="num" />
+          </Form.Item>
+          <Form.Item name="weight" label="权重" rules={[{ required: true, message: "请输入权重" }]}>
+            <InputNumber min={1} max={1000} style={{ width: "100%" }} />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       {/* 新增节点 Modal */}
       <Modal

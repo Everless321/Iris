@@ -113,7 +113,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me/password", post(change_my_password))
         // 节点：admin only
         .route("/api/nodes", get(list_nodes).post(create_node))
-        .route("/api/nodes/:id", axum::routing::delete(delete_node))
+        .route("/api/nodes/:id", axum::routing::delete(delete_node).patch(update_node))
         .route("/api/nodes/:id/enrollment", post(create_enrollment))
         .route("/api/nodes/enroll", post(enroll_node))
         // M7 节点资源监控
@@ -338,6 +338,47 @@ async fn create_node(
         version: String::new(),
         version_updated_at_ms: 0,
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct NodePatch {
+    name: Option<String>,
+    addr: Option<String>,
+    weight: Option<i64>,
+}
+
+async fn update_node(
+    _: AdminClaims,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(p): Json<NodePatch>,
+) -> Result<Json<Node>, ApiErr> {
+    if let Some(n) = &p.name {
+        if n.trim().is_empty() { return Err(bad("名称不能为空")); }
+    }
+    if let Some(w) = p.weight {
+        if w <= 0 { return Err(bad("权重必须 > 0")); }
+    }
+    if p.name.is_none() && p.addr.is_none() && p.weight.is_none() {
+        return Err(bad("无可更新字段"));
+    }
+    let mut sets: Vec<&str> = Vec::new();
+    if p.name.is_some() { sets.push("name=?"); }
+    if p.addr.is_some() { sets.push("addr=?"); }
+    if p.weight.is_some() { sets.push("weight=?"); }
+    let sql = format!("UPDATE nodes SET {} WHERE id=?", sets.join(","));
+    let mut q = sqlx::query(&sql);
+    if let Some(n) = &p.name { q = q.bind(n); }
+    if let Some(a) = &p.addr { q = q.bind(a); }
+    if let Some(w) = p.weight { q = q.bind(w); }
+    q = q.bind(&id);
+    let res = q.execute(&s.pool).await.map_err(err)?;
+    if res.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "节点不存在".into()));
+    }
+    let row = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id=?")
+        .bind(&id).fetch_one(&s.pool).await.map_err(err)?;
+    Ok(Json(row))
 }
 
 async fn delete_node(
