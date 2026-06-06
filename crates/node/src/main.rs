@@ -3,6 +3,7 @@ mod fastpath;
 mod forward;
 mod lb;
 mod metrics;
+mod neighbor_probe;
 mod quic_tunnel;
 mod ratelimit;
 mod raw_tunnel;
@@ -732,6 +733,46 @@ async fn main() -> Result<()> {
     )
     .await;
 
+    // M9.2 邻居延迟探测器：周期 TCP connect 所有非自己节点测 RTT，EWMA 平滑后心跳上报。
+    // master 聚合成 N×N 矩阵，sync_config 时给本节点下发「以自己为原点」的真实 RTT。
+    let neighbor_probe = {
+        let ctx_ls = ctx.clone();
+        let lister: Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync> =
+            Arc::new(move || {
+                ctx_ls
+                    .nodes
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, n)| (id.clone(), n.addr.clone()))
+                    .collect()
+            });
+        let interval = std::env::var("IRIS_NEIGHBOR_PROBE_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+        let timeout_ms = std::env::var("IRIS_NEIGHBOR_PROBE_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1500);
+        let disabled = std::env::var("IRIS_NEIGHBOR_PROBE_DISABLE")
+            .ok()
+            .as_deref()
+            == Some("1");
+        if disabled {
+            tracing::info!("neighbor probe disabled by env");
+            Arc::new(neighbor_probe::NeighborProbe::new())
+        } else {
+            tracing::info!(interval_secs = interval, timeout_ms, "neighbor probe started");
+            neighbor_probe::spawn(
+                node_id.clone(),
+                Duration::from_secs(interval),
+                Duration::from_millis(timeout_ms),
+                lister,
+            )
+        }
+    };
+
     // 心跳循环：2s 一次（含 session_events 上报，节奏决定历史/活跃数据的实时性下限）。
     // 同时刷新节点视图 + 同步 forward listener 状态。
     let mut seq = 0u64;
@@ -774,6 +815,7 @@ async fn main() -> Result<()> {
                 capabilities: fastpath_cap_json.clone(),
                 metrics: metrics_sample,
                 node_version: iris_common::version_string(),
+                neighbor_rtt_ms: neighbor_probe.snapshot(),
             })
             .await
         {
