@@ -607,11 +607,15 @@ do_uninstall() {
     exit 0
   fi
 
-  if command -v systemctl >/dev/null && systemctl list-unit-files iris-node.service >/dev/null 2>&1; then
-    info "停 + 禁用 systemd 服务"
-    systemctl stop iris-node.service 2>/dev/null || true
-    systemctl disable iris-node.service 2>/dev/null || true
-    rm -f /etc/systemd/system/iris-node.service
+  if command -v systemctl >/dev/null; then
+    for svc in iris-node.service iris-master.service; do
+      if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
+        info "停 + 禁用 $svc"
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+        rm -f "/etc/systemd/system/$svc"
+      fi
+    done
     systemctl daemon-reload
   fi
 
