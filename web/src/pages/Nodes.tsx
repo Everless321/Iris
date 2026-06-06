@@ -319,9 +319,29 @@ export default function Nodes() {
           <Title level={3} style={{ marginBottom: 4 }}>节点管理</Title>
           <Text type="secondary">添加节点后系统会生成一键安装命令，SSH 到目标服务器粘贴即可</Text>
         </div>
-        <Button type="primary" size="large" icon={<PlusOutlined />} onClick={() => setAdding(true)}>
-          新增节点
-        </Button>
+        <Space size={8}>
+          <Popconfirm
+            title="批量升级所有节点"
+            description="对每个节点下发升级命令。已有正在进行的升级会跳过。"
+            okText="开始升级" cancelText="取消"
+            onConfirm={async () => {
+              try {
+                const r = await api.post<{ triggered: { node_id: string }[]; skipped: { node_id: string; reason: string }[] }>("/api/nodes/upgrade-all", {});
+                message.success(`已触发 ${r.triggered.length} 台${r.skipped.length ? `，跳过 ${r.skipped.length}（已在升级中）` : ""}`);
+                load();
+              } catch (e) {
+                message.error((e as Error).message);
+              }
+            }}
+          >
+            <Button size="large" icon={<CloudUploadOutlined />}>
+              批量升级
+            </Button>
+          </Popconfirm>
+          <Button type="primary" size="large" icon={<PlusOutlined />} onClick={() => setAdding(true)}>
+            新增节点
+          </Button>
+        </Space>
       </div>
 
       <Card>

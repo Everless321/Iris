@@ -123,6 +123,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/:id/metrics/stream", get(metrics_stream))
         // M8 agent 远程升级
         .route("/api/nodes/:id/upgrade", post(trigger_upgrade))
+        // M9.3 一键批量升级所有节点
+        .route("/api/nodes/upgrade-all", post(trigger_upgrade_all))
         .route("/api/commands", get(list_recent_commands))
         .route("/api/commands/:request_id", get(get_command))
         .route("/api/commands/stream", get(commands_stream))
@@ -533,6 +535,105 @@ async fn trigger_upgrade(
         tracing::info!(%node_id, %request_id, "node offline, command queued");
     }
     Ok(Json(UpgradeResp { request_id, node_id, issued_at_ms: now }))
+}
+
+#[derive(Serialize)]
+struct UpgradeAllResp {
+    triggered: Vec<UpgradeResp>,
+    skipped: Vec<SkippedNode>,
+}
+
+#[derive(Serialize)]
+struct SkippedNode {
+    node_id: String,
+    reason: String, // "in_progress" | "create_failed"
+}
+
+/// M9.3 批量升级所有节点：对每个节点跑一遍 trigger_upgrade 逻辑。
+/// 已有进行中命令的节点跳过（记 skipped）。返回 triggered/skipped 两个数组。
+/// 节点离线的也照常入队，命令流重连后会 drain pending。
+async fn trigger_upgrade_all(
+    claims: Claims,
+    State(s): State<AppState>,
+) -> Result<Json<UpgradeAllResp>, ApiErr> {
+    if !claims.is_admin() {
+        return Err((StatusCode::FORBIDDEN, "admin only".into()));
+    }
+    let nodes: Vec<String> = sqlx::query_scalar("SELECT id FROM nodes ORDER BY id")
+        .fetch_all(&s.pool)
+        .await
+        .map_err(err)?;
+
+    let mut triggered = Vec::new();
+    let mut skipped = Vec::new();
+    for node_id in nodes {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM node_commands WHERE node_id=? AND status IN (1, 2)",
+        )
+        .bind(&node_id)
+        .fetch_one(&s.pool)
+        .await
+        .unwrap_or(0);
+        if pending > 0 {
+            skipped.push(SkippedNode {
+                node_id,
+                reason: "in_progress".into(),
+            });
+            continue;
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        let payload = serde_json::json!({
+            "kind": "upgrade",
+            "expected_sha256": "",
+            "target_ref": "",
+        });
+        if sqlx::query(
+            "INSERT INTO node_commands \
+             (request_id, node_id, kind, payload, status, issued_by, issued_at_ms) \
+             VALUES (?, ?, 'upgrade', ?, 1, ?, ?)",
+        )
+        .bind(&request_id)
+        .bind(&node_id)
+        .bind(payload.to_string())
+        .bind(claims.sub)
+        .bind(now)
+        .execute(&s.pool)
+        .await
+        .is_err()
+        {
+            skipped.push(SkippedNode {
+                node_id,
+                reason: "create_failed".into(),
+            });
+            continue;
+        }
+
+        // 推 stream（在线时立刻送达；离线时 stream 重连会 drain pending）
+        let routers = s.command_routers.lock().await;
+        if let Some(tx) = routers.get(&node_id) {
+            let cmd = iris_proto::control::Command {
+                request_id: request_id.clone(),
+                issued_at_ms: now,
+                kind: Some(iris_proto::control::command::Kind::Upgrade(
+                    iris_proto::control::UpgradeCommand {
+                        expected_sha256: String::new(),
+                        target_ref: String::new(),
+                    },
+                )),
+            };
+            let _ = tx.send(Ok(cmd)).await;
+        }
+        triggered.push(UpgradeResp { request_id, node_id, issued_at_ms: now });
+    }
+
+    tracing::warn!(
+        triggered = triggered.len(),
+        skipped = skipped.len(),
+        "batch upgrade triggered"
+    );
+    Ok(Json(UpgradeAllResp { triggered, skipped }))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
