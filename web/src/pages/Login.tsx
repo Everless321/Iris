@@ -40,21 +40,11 @@ export default function Login() {
         }}
       >
         <Space size={10}>
-          <div
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: 8,
-              background: "#fff",
-              color: "#1677ff",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontWeight: 700,
-            }}
-          >
-            z
-          </div>
+          <img
+            src="/logo.png"
+            alt="Iris"
+            style={{ width: 32, height: 32, borderRadius: 8, background: "#fff" }}
+          />
           <span style={{ fontSize: 16, fontWeight: 600 }}>Iris</span>
         </Space>
 
