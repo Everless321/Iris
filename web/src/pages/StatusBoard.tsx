@@ -250,3 +250,4 @@ export default function StatusBoard() {
     </div>
   );
 }
+// M8.X verification: UI-only commit should NOT bump IRIS_GIT_HASH (it stays at 7e74e8df)
