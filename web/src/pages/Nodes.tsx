@@ -277,7 +277,7 @@ export default function Nodes() {
       render: (_, n) => <VersionBadge nodeVer={n.version} masterVer={masterVersion} />,
     },
     {
-      title: "操作", key: "actions", width: 200, align: "right",
+      title: "操作", key: "actions", width: 280, align: "right", fixed: "right",
       render: (_, n) => (
         <Space size={4}>
           <Tooltip title="查看 CPU/内存/磁盘/网速 实时监控">

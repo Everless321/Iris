@@ -119,6 +119,7 @@ export default function Forwards() {
       key: "actions",
       width: 140,
       align: "right",
+      fixed: "right",
       render: (_, f) => (
         <Space size={4}>
           <Link to={`/admin/forwards/${f.id}/edit`}>

@@ -51,7 +51,7 @@ export default function Invites() {
       ),
     },
     {
-      title: "操作", key: "actions", width: 100, align: "right",
+      title: "操作", key: "actions", width: 100, align: "right", fixed: "right",
       render: (_, i) =>
         !i.used_by && (
           <Button type="link" size="small" icon={<CopyOutlined />} onClick={() => copy(i.code)}>
@@ -79,6 +79,7 @@ export default function Invites() {
           loading={list === null}
           dataSource={list ?? []}
           columns={columns}
+          scroll={{ x: "max-content" }}
           pagination={{ pageSize: 10, hideOnSinglePage: true }}
         />
       </Card>
