@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +76,8 @@ pub async fn run_udp_single_hop(
     rate: Arc<crate::ratelimit::RateLimit>,
     bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
-    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
+    // 绑定 IPv6 通配 [::]，双栈同时服务 v4+v6（见 sock::udp_bind）
+    let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), listen_port);
     let sock = match sock::udp_bind(bind_addr) {
         Ok(s) => {
             let _ = bind_result.send(Ok(()));
@@ -135,18 +136,14 @@ pub async fn run_udp_single_hop(
                 continue;
             }
         };
-        let out_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-        let out = match sock::udp_bind(out_bind) {
+        // 出口地址族跟随目标，支持 IPv6 target
+        let out = match sock::udp_connect(&pick).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "udp out bind");
+                tracing::warn!(target = %pick, error = %e, "udp out connect");
                 continue;
             }
         };
-        if let Err(e) = out.connect(&pick).await {
-            tracing::warn!(target = %pick, error = %e, "udp out connect");
-            continue;
-        }
         let out = Arc::new(out);
         let session = Arc::new(SingleSession {
             out: out.clone(),
@@ -231,7 +228,8 @@ pub async fn run_udp_multi_hop(
     rate: Arc<crate::ratelimit::RateLimit>,
     bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
-    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
+    // 绑定 IPv6 通配 [::]，双栈同时服务 v4+v6（见 sock::udp_bind）
+    let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), listen_port);
     let sock = match sock::udp_bind(bind_addr) {
         Ok(s) => {
             let _ = bind_result.send(Ok(()));

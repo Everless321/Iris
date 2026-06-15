@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -302,7 +302,8 @@ pub async fn run_multi_hop_entry(
     link_encryption: String,
     bind_result: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> Result<()> {
-    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), listen_port);
+    // 绑定 IPv6 通配 [::]，双栈同时服务 v4+v6（见 sock::tcp_listen）
+    let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), listen_port);
     let l = match sock::tcp_listen(bind_addr) {
         Ok(l) => {
             let _ = bind_result.send(Ok(()));
@@ -547,12 +548,8 @@ impl DataPlane for DataPlaneSvc {
                 let pick = ordered.first().cloned().ok_or_else(|| {
                     Status::unavailable("no usable udp target".to_string())
                 })?;
-                let usock = sock::udp_bind(SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                    0,
-                ))
-                .map_err(|e| Status::unavailable(format!("udp bind: {e}")))?;
-                usock.connect(&pick).await.map_err(|e| {
+                // 出口地址族跟随目标，支持 IPv6 target
+                let usock = sock::udp_connect(&pick).await.map_err(|e| {
                     Status::unavailable(format!("udp connect {pick}: {e}"))
                 })?;
                 let usock = Arc::new(usock);
