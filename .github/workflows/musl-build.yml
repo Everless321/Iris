@@ -107,7 +107,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         # Pinned to full commit SHA (security: prevents tag-hijack supply-chain attack).
         # To bump: gh api repos/softprops/action-gh-release/git/refs/tags/v2.X.Y --jq '.object.sha'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
         with:
           tag_name: rolling
           name: "Rolling (auto-built from main)"
